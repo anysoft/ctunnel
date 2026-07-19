@@ -41,6 +41,7 @@ usage() {
   --generator NAME       CMake generator，例如 Ninja 或 Unix Makefiles
   --toolchain FILE       CMake toolchain file，用于交叉编译
   --target-name NAME     打包目标名，默认按平台/架构/链接模式生成
+  --version VERSION      覆盖二进制和包名版本，例如 0.0.6
   --tests / --no-tests   是否构建并运行测试，默认 no-tests
   --package / --no-package
                          是否打包，默认 package
@@ -67,6 +68,7 @@ build_type=Release
 generator=
 toolchain=
 target_name=
+version_override=
 build_tests=OFF
 package=1
 
@@ -81,6 +83,7 @@ while [ "$#" -gt 0 ]; do
     --generator) generator=${2:?missing value for --generator}; shift 2 ;;
     --toolchain) toolchain=${2:?missing value for --toolchain}; shift 2 ;;
     --target-name) target_name=${2:?missing value for --target-name}; shift 2 ;;
+    --version) version_override=${2:?missing value for --version}; shift 2 ;;
     --tests) build_tests=ON; shift ;;
     --no-tests) build_tests=OFF; shift ;;
     --package) package=1; shift ;;
@@ -165,6 +168,9 @@ fi
 if [ -n "$toolchain" ]; then
   cmake_args+=(-DCMAKE_TOOLCHAIN_FILE="$toolchain")
 fi
+if [ -n "$version_override" ]; then
+  cmake_args+=(-DCTUNNEL_VERSION_OVERRIDE="$version_override")
+fi
 if [ -n "${CMAKE_EXTRA_ARGS:-}" ]; then
   # shellcheck disable=SC2206
   extra_args=( ${CMAKE_EXTRA_ARGS} )
@@ -196,7 +202,9 @@ if [ "$build_tests" = ON ]; then
 fi
 
 if [ "$package" -eq 1 ]; then
-  if [ -z "${VERSION:-}" ]; then
+  if [ -n "$version_override" ]; then
+    VERSION="$version_override"
+  elif [ -z "${VERSION:-}" ]; then
     git_short=$(git rev-parse --short=12 HEAD 2>/dev/null || echo local)
     VERSION="0.1.0-dev+$git_short"
   fi
