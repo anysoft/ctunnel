@@ -73,6 +73,7 @@ jobs:
         include:
           - {name: linux-i686-mostly-static, host: i686-linux-gnu, apt: gcc-i686-linux-gnu, tc: linux-i686.cmake, expect: "Intel 80386"}
           - {name: linux-aarch64-mostly-static, host: aarch64-linux-gnu, apt: gcc-aarch64-linux-gnu, tc: linux-aarch64.cmake, expect: "ARM aarch64"}
+          - {name: linux-armv5-gnueabi-mostly-static, host: arm-linux-gnueabi, apt: "gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi", tc: linux-armv5-gnueabi.cmake, expect: "ARM"}
           - {name: linux-armv7-gnueabihf-mostly-static, host: arm-linux-gnueabihf, apt: gcc-arm-linux-gnueabihf, tc: linux-armv7.cmake, expect: "ARM"}
           - {name: linux-mips-mostly-static, host: mips-linux-gnu, apt: gcc-mips-linux-gnu, tc: linux-mips.cmake, expect: "MIPS"}
           - {name: linux-mipsel-mostly-static, host: mipsel-linux-gnu, apt: gcc-mipsel-linux-gnu, tc: linux-mipsel.cmake, expect: "MIPS"}
