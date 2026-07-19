@@ -17,17 +17,17 @@ config MAX_CLIENTS
 config MAX_SERVICES
 	int "Maximum services"
 	range 1 256
-	default 16
+	default 32
 
 config MAX_STREAMS
 	int "Maximum concurrent streams"
 	range 1 4096
-	default 64
+	default 256
 
 config MAX_PENDING_STREAMS
 	int "Maximum pending public connections"
 	range 1 1024
-	default 16
+	default 256
 
 config MAX_FRAME_SIZE
 	int "Maximum protocol frame size"
@@ -72,29 +72,29 @@ config CONTROL_BUFFER_SIZE
 config DEFAULT_MAX_STREAMS
 	int "Default runtime stream limit"
 	range 1 MAX_STREAMS
-	default 64
+	default 256
 
 config DEFAULT_MAX_PENDING_STREAMS
 	int "Default runtime pending limit"
 	range 1 MAX_PENDING_STREAMS
-	default 16
+	default 256
 
 config DEFAULT_POOL_COUNT
 	int "Default idle work-connection pool"
 	range 0 64
-	default 2 if FEATURE_WORK_POOL
+	default 16 if FEATURE_WORK_POOL
 	default 0
 
 config DEFAULT_POOL_MIN
 	int "Default minimum work-connection pool"
 	range 0 64
-	default 1 if FEATURE_WORK_POOL
+	default 4 if FEATURE_WORK_POOL
 	default 0
 
 config DEFAULT_POOL_MAX
 	int "Default maximum work-connection pool"
 	range 0 64
-	default 8 if FEATURE_WORK_POOL
+	default 32 if FEATURE_WORK_POOL
 	default 0
 
 config MINI_MAX_BINARY_SIZE_KIB

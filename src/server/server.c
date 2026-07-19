@@ -427,10 +427,24 @@ int ct_run_server(const ct_config *cfg) {
                 for (size_t i = 0; i < s->listen_n && f == CT_INVALID_SOCKET; i++)
                     f = ct_net_accept(s->listen_fd[i], NULL, 0);
                 if (f != CT_INVALID_SOCKET) {
-                    if (p->pending_n >= (size_t)cfg->max_pending_streams ||
-                        p->pending_n == MAX_PENDING ||
-                        active_streams(p) >= (size_t)p->auth->max_streams ||
-                        active_streams(p) >= (size_t)cfg->max_streams_per_client) {
+                    size_t streams = active_streams(p);
+                    const char *reject_reason = NULL;
+                    if (p->pending_n >= (size_t)cfg->max_pending_streams)
+                        reject_reason = "PENDING_LIMIT";
+                    else if (p->pending_n == MAX_PENDING)
+                        reject_reason = "COMPILED_PENDING_LIMIT";
+                    else if (streams >= (size_t)p->auth->max_streams)
+                        reject_reason = "CLIENT_STREAM_LIMIT";
+                    else if (streams >= (size_t)cfg->max_streams_per_client)
+                        reject_reason = "SERVER_STREAM_LIMIT";
+                    if (reject_reason) {
+                        CT_LOGW("server",
+                                "client_id=%s service_id=%s stream rejected reason=%s "
+                                "pending=%zu/%d streams=%zu client_stream_limit=%d "
+                                "server_stream_limit=%d",
+                                p->ctl.client_id, s->cfg.id, reject_reason, p->pending_n,
+                                cfg->max_pending_streams, streams, p->auth->max_streams,
+                                cfg->max_streams_per_client);
                         ct_socket_close(f);
                     } else {
                         p->pending[p->pending_n++] =

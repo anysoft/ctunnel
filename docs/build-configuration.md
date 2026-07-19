@@ -62,6 +62,22 @@ make olddefconfig
 make
 ```
 
+上面是 16MB Flash / 小内存设备的保守 Mini 示例。普通光猫、软路由、VLESS 或网页转发建议使用默认档位，或显式提高并发：
+
+```sh
+./configure \
+  --enable-default \
+  --enable-both \
+  --enable-mostly-static \
+  --with-max-services=32 \
+  --with-max-streams=256 \
+  --with-max-pending-streams=256 \
+  --with-default-max-streams=256 \
+  --with-default-max-pending-streams=256 \
+  --with-default-pool-count=16
+make
+```
+
 `--with-log-level` 设置的是编译期最高日志级别，同时也是默认运行时日志级别。若编译为 `warn`，配置文件中的 `log_level=info` 会不可用，info/debug/trace 级别的普通日志也不会进入二进制。需要运行期可切到 info 时，应使用 `--with-log-level=info` 或更高。
 
 常用资源参数会映射到编译期 Kconfig 硬限制或运行时默认值：
