@@ -55,9 +55,34 @@ make olddefconfig
   --disable-data-encryption --disable-keygen \
   --enable-mostly-static \
   --with-log-level=warn \
-  --with-max-services=4
+  --with-max-clients=4 \
+  --with-max-services=16 \
+  --with-max-streams=64 \
+  --with-max-pending-streams=16
 make
 ```
+
+常用资源参数会映射到编译期 Kconfig 硬限制或运行时默认值：
+
+| configure 参数 | Kconfig 符号 |
+|---|---|
+| `--with-max-clients=N` | `CONFIG_MAX_CLIENTS` |
+| `--with-max-services=N` | `CONFIG_MAX_SERVICES` |
+| `--with-max-streams=N` | `CONFIG_MAX_STREAMS` |
+| `--with-max-pending-streams=N` | `CONFIG_MAX_PENDING_STREAMS` |
+| `--with-max-frame-size=N` | `CONFIG_MAX_FRAME_SIZE` |
+| `--with-max-client-id-length=N` | `CONFIG_MAX_CLIENT_ID_LENGTH` |
+| `--with-max-service-id-length=N` | `CONFIG_MAX_SERVICE_ID_LENGTH` |
+| `--with-max-address-length=N` | `CONFIG_MAX_ADDRESS_LENGTH` |
+| `--with-max-path-length=N` | `CONFIG_MAX_PATH_LENGTH` |
+| `--with-max-port-ranges=N` | `CONFIG_MAX_PORT_RANGES` |
+| `--with-stream-buffer-size=N` | `CONFIG_STREAM_BUFFER_SIZE` |
+| `--with-control-buffer-size=N` | `CONFIG_CONTROL_BUFFER_SIZE` |
+| `--with-default-max-streams=N` | `CONFIG_DEFAULT_MAX_STREAMS` |
+| `--with-default-max-pending-streams=N` | `CONFIG_DEFAULT_MAX_PENDING_STREAMS` |
+| `--with-default-pool-count=N` | `CONFIG_DEFAULT_POOL_COUNT` |
+| `--with-default-pool-min=N` | `CONFIG_DEFAULT_POOL_MIN` |
+| `--with-default-pool-max=N` | `CONFIG_DEFAULT_POOL_MAX` |
 
 相互冲突的档位、同时禁用两种角色、同时禁用两种地址族、无效日志级别、不可满足的功能依赖和超范围整数都会导致失败。构建路径和工具链参数单独记录在 `.ctunnel-configure.mk` 中；该文件不保存功能配置。
 

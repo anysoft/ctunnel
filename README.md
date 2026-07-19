@@ -1,72 +1,107 @@
 # ctunnel
 
-`ctunnel` 是一个使用 C11 编写的轻量级反向 TCP 隧道，面向资源受限的 Linux/OpenWrt/Buildroot 设备，同时支持 macOS 和 Windows。项目采用 BusyBox 风格的 Kconfig 构建体系，可生成仅服务端、仅客户端或同时包含两种角色的可执行文件。客户端主动建立经过认证的控制连接及所有工作连接，因此服务端不会反向连接客户端地址。
+`ctunnel` 是一个纯 C11 编写的轻量级反向 TCP 隧道工具，适合把内网设备上的 TCP 服务暴露到一台公网服务器上。客户端主动连到服务端，服务端不会反向连接客户端地址；控制通道和工作连接都会做双向公钥认证，Monocypher 会随源码直接编译进程序，不依赖 libsodium、OpenSSL 或 mbedTLS。
 
-第一期支持 TCP 映射、多服务、双向公钥认证、临时 X25519、加密并防重放的控制帧、经过认证的工作连接、按服务配置 DATA `required`/`disabled`、心跳、断线重连与重新注册、有界缓冲区，以及 IPv4/IPv6。第一期不实现 UDP、HTTP 路由、TLS 终止、QUIC、多路复用或管理面板。
+项目重点是小体积、可裁剪、便于交叉编译。它支持 Linux/OpenWrt/Buildroot、macOS 和 Windows，并提供 BusyBox 风格的 Kconfig 配置体系，可以按目标设备选择完整工具集或 Mini 服务端。
 
-## 第一期密码学方案
+## 主要能力
 
-第一期只有一个密码学后端：随源码固定提供的 Monocypher 4.0.3 核心库。项目使用其真实核心 API 和算法：
+- TCP 反向映射：把客户端本地服务映射到服务端监听端口。
+- 多服务配置：一个客户端可注册多个 TCP 服务。
+- 公钥身份认证：服务端和客户端都使用固定公钥验证对端。
+- 控制通道加密：控制帧始终认证加密并防重放。
+- DATA 加密可选：每个服务可设置 `data_encryption = required` 或 `disabled`。
+- 自动重连：客户端断线后自动重连并重新注册服务。
+- 可裁剪构建：可选择 client/server/both、Mini/default/full、动态/半静态/全静态链接。
 
-- 签名：Monocypher EdDSA-BLAKE2b（`crypto_eddsa_*`），不是 Ed25519；
-- 临时密钥协商：X25519（`crypto_x25519*`）；
-- 认证加密（AEAD）：XChaCha20-Poly1305（`crypto_aead_lock`/`crypto_aead_unlock`）；
-- KDF 与握手转录哈希：BLAKE2b 提取及计数器模式扩展；
-- 随机数：操作系统 CSPRNG（Linux 使用 `getrandom` 并回退到 `/dev/urandom`，macOS/BSD 使用 `arc4random_buf`，Windows 使用 BCrypt）。
+更细的协议和安全说明见 [docs/protocol.md](docs/protocol.md) 和 [docs/security.md](docs/security.md)。
 
-Monocypher 会直接编译进可执行文件。目标系统不需要安装密码学共享库或 pkg-config 包，构建过程也不会从网络下载依赖。源码来源、哈希和许可证记录在 `third_party/monocypher/` 下。
+## 下载哪个包
 
-来源与更新规则见 `docs/dependencies.md`，实测文件大小、节、符号和依赖结果见 `docs/size-report.md`。
+普通桌面/服务器平台优先下载不带 `mini` 的包，例如：
 
-## 链接模式
+- `linux-x86_64-mostly-static`
+- `linux-i686-mostly-static`
+- `macos-arm64-mostly-static`
+- `macos-x86_64-mostly-static`
+- `windows-x86_64-static-runtime`
+- `windows-i686-static-runtime`
 
-链接策略是独立的 Kconfig 三选一配置。默认的 Mostly-static 会把 ctunnel 与 Monocypher 编入同一个可执行文件，同时允许使用目标系统已有的 libc/运行库。Dynamic 使用平台默认动态运行库，适合开发调试。Fully-static 在具备静态库的 Linux SDK 上生成不含动态解释器和 `NEEDED` 项的 ELF；Windows 使用静态 CRT（仍保留系统 DLL）；macOS 会明确拒绝该模式。
+这些包包含 `client`、`server`、`keygen`、`fingerprint`、`configtest` 和 `build-info` 等常用命令。
 
-```sh
-make dynamic
-make mostly-static
-make static
-./configure --enable-mini --enable-server --enable-mostly-static
-```
+ARM、MIPS 等嵌入式设备通常下载 `mini` 包。Mini 包主要用于只跑服务端的小设备，会裁剪 keygen、fingerprint、build-info 等工具；密钥建议在 PC/Mac/Linux 主机上生成后再复制到设备。
 
-每次链接都会生成经过验证的 `ctunnel.link-report.txt`，其中记录真实依赖表、链接模式、libc、编译器、目标 triplet、文件大小和节信息。fragment 组合方式、musl/glibc/uClibc 策略、平台语义及验证规则见 `docs/link-modes.md`。
+Mini 包还有更小的编译期资源上限：通常只允许 `max_clients = 1`、`max_services_per_client = 4`、`max_streams_per_client = 8`、`max_pending_streams = 4`，最高日志级别为 `warn`。运行时配置不能超过这些上限；Release 包内的 `ctunnel.config` 记录了该二进制的实际编译配置。
 
-## 配置、构建和测试
+如果设备是旧 glibc，例如 Buildroot glibc 2.26，不要使用公开 GitHub runner 生成的 ARM mostly-static 包；应使用设备 SDK 本地构建。细节见 [docs/cross-compilation.md](docs/cross-compilation.md)。
 
-需要 Python 3.8+、CMake 3.16+ 和 C11 编译器。Kconfiglib 14.1.0 已固定版本并随源码提供，配置阶段不会下载软件包。
+## 快速开始
 
-```sh
-make default_defconfig
-make
-make test
-```
-
-`.config` 是功能配置的唯一来源，并生成 `include/generated/autoconf.h`、`build/generated/config.cmake` 和 `build/generated/config.mk`；CMake 不维护第二套功能选项。可通过以下命令检查或自动修改：
+在可信主机上生成两组身份密钥：
 
 ```sh
-make menuconfig
-scripts/config --enable FEATURE_BUILD_INFO
-scripts/config --set-val MAX_STREAMS 64
-make olddefconfig
+ctunnel keygen --private server.key --public server.pub
+ctunnel keygen --private client.key --public client.pub
 ```
 
-Linux 默认使用 epoll，macOS/BSD 默认使用 kqueue，Windows 默认使用 WSAPoll。直接执行 CMake 时，仅在配置文件不存在的情况下创建平台默认 `.config`。预设、非交互构建、`./configure` 映射、硬限制和外部配置路径见 `docs/build-configuration.md`。
+文件用途：
 
-## Mini 构建
+- 服务端保存 `server.key`，并在 `clients.ini` 中引用 `client.pub`。
+- 客户端保存 `client.key`，并在 `client.ini` 中引用 `server.pub`。
+- 私钥不要复制给对端；Linux/macOS 上建议权限为 `0600`。
 
-Mini 是仅支持 IPv6 的服务端程序，编译期限制为一个客户端、四个服务、八个流，使用 Warn 级别日志和小型工作连接池，并保留强制的控制通道认证/加密与工作连接绑定。它裁剪客户端角色、转发 DATA 加密、keygen/fingerprint/configtest/build-info applet、详细帮助，以及 Debug/Trace 日志。密钥应使用功能完整的宿主机构建生成。
+服务端配置可从 [examples/server.ini](examples/server.ini) 和 [examples/clients.ini](examples/clients.ini) 开始：
+
+```ini
+[common]
+mode = server
+bind_addr = ::
+bind_port = 7000
+identity_private_key = /etc/ctunnel/server.key
+authorized_clients_file = /etc/ctunnel/clients.ini
+```
+
+客户端配置可从 [examples/client.ini](examples/client.ini) 开始。下面示例把客户端本机 SSH 映射到服务端的 `2222` 端口：
+
+```ini
+[common]
+mode = client
+server_addr = 2001:db8::10
+server_port = 7000
+client_id = vps-sg
+identity_private_key = /etc/ctunnel/client.key
+server_public_key = /etc/ctunnel/server.pub
+
+[ssh]
+type = tcp
+remote_addr = ::
+remote_port = 2222
+local_addr = 127.0.0.1
+local_port = 22
+data_encryption = disabled
+```
+
+启动前建议先检查配置：
 
 ```sh
-make mini_defconfig
-make BUILD_TYPE=MinSizeRel
-make size-check
+ctunnel configtest -c /etc/ctunnel/server.ini
+ctunnel configtest -c /etc/ctunnel/client.ini
 ```
 
-`make mini` 会组合执行以上命令。`make size-compare` 构建 Default、Mini 服务端、Mini 客户端和 Full 变体，并保存每份 `.config` 和体积报告。`make dist` 生成已裁剪符号的 `dist/ctunnel`、`dist/ctunnel.config`、链接/体积报告及校验和。
+分别启动服务端和客户端：
 
-## 子命令（Applet）
+```sh
+ctunnel server -c /etc/ctunnel/server.ini
+ctunnel client -c /etc/ctunnel/client.ini
+```
 
-程序只会列出并接受已经编译进二进制的 applet：
+然后从外部访问服务端：
+
+```sh
+ssh -p 2222 user@server.example.com
+```
+
+## 常用命令
 
 ```sh
 ctunnel server -c server.ini
@@ -74,32 +109,83 @@ ctunnel client -c client.ini
 ctunnel configtest -c client.ini
 ctunnel keygen --private client.key --public client.pub
 ctunnel fingerprint client.pub
-ctunnel build-config
+ctunnel build-info
+ctunnel --version
 ```
 
-当对应角色被编译时，也支持 `ctunnel-server` 和 `ctunnel-client` 这两个 argv[0] 别名。旧式 `ctunnel -c FILE` 调用仍然可用。被禁用的 applet 不会在调度表中出现，其实现目标文件也不会进入二进制。
+实际可用命令取决于编译配置。Mini 包可能只包含 `server`、`--help` 和 `--version`。
 
-## 快速开始
+## 从源码构建
 
-在可信主机上分别生成服务端和客户端身份：
+依赖：
+
+- Python 3.8+
+- CMake 3.16+
+- C11 编译器
+
+默认构建：
 
 ```sh
-ctunnel keygen --private server.key --public server.pub
-ctunnel keygen --private client.key --public client.pub
-ctunnel fingerprint server.pub
+make default_defconfig
+make
+make test
 ```
 
-只把 `client.pub` 复制到服务端，只把 `server.pub` 复制到客户端。不要把任一端的私钥复制给另一端，并使用 `0600` 权限保护私钥。可从 `examples/server.ini`、`examples/clients.ini` 和 `examples/client.ini` 开始配置；授权文件必须允许准确的远端监听地址和端口。
+Mini 服务端构建：
 
 ```sh
-ctunnel configtest -c /etc/ctunnel/server.ini
-ctunnel server -c /etc/ctunnel/server.ini
+make mini_defconfig
+make BUILD_TYPE=MinSizeRel
+make size-check
 ```
 
-如果应用流量已经由正确配置的 SSH 或 TLS 提供端到端保护，可将 DATA 加密设为 `disabled`，避免重复加密。明文 HTTP、Telnet 和数据库流量应使用 `required`。控制通道始终加密且不能关闭。第一期唯一接受的密码套件名称是 `xchacha20-poly1305`，其他值会被拒绝。
+也可以使用 `./configure`：
 
-## 交叉编译与安全
+```sh
+./configure --enable-mini --enable-server --enable-mostly-static --disable-tests
+make
+```
 
-ARM32 Buildroot、ARMv7、AArch64、MIPS/MIPSEL、OpenWrt 和 MinGW 构建方式见 `docs/cross-compilation.md`。目标 sysroot 只需提供 libc 和网络运行库；Monocypher 使用仓库中固定版本的源码编译。
+更多构建选项见 [docs/build-configuration.md](docs/build-configuration.md)。
 
-将监听器暴露到公网前，请阅读 `docs/security.md`。DATA `disabled` 会使网络观察者看到应用明文。本项目使用自定义协议，尚未经过独立安全审计，不应将其描述为 TLS 替代品或绝对安全方案。控制会话丢失时，活动流会被关闭而不是恢复。
+## 交叉编译
+
+Buildroot ARM32 示例：
+
+```sh
+export CTUNNEL_TOOLCHAIN_ROOT=/path/to/arm-buildroot-linux-gnueabi_sdk-buildroot
+
+./configure \
+  --enable-mini \
+  --enable-server \
+  --enable-mostly-static \
+  --with-toolchain-root="$CTUNNEL_TOOLCHAIN_ROOT" \
+  --with-toolchain-file=cmake/toolchains/buildroot-arm.cmake.example \
+  --with-bundled-monocypher \
+  --disable-tests \
+  --build-dir=build-arm
+
+cmake --build build-arm --parallel
+```
+
+交叉编译、OpenWrt/Buildroot 集成、glibc/musl/uClibc 链接策略见：
+
+- [docs/cross-compilation.md](docs/cross-compilation.md)
+- [docs/embedded-builds.md](docs/embedded-builds.md)
+- [docs/link-modes.md](docs/link-modes.md)
+
+## 文档索引
+
+- [docs/configuration.md](docs/configuration.md)：运行时配置文件说明。
+- [docs/build-configuration.md](docs/build-configuration.md)：Kconfig、configure、Makefile 和 CMake 配置。
+- [docs/cross-compilation.md](docs/cross-compilation.md)：交叉编译和 SDK 注意事项。
+- [docs/link-modes.md](docs/link-modes.md)：dynamic、mostly-static、fully-static 语义。
+- [docs/security.md](docs/security.md)：安全边界和部署注意事项。
+- [docs/protocol.md](docs/protocol.md)：线协议和密码学细节。
+- [docs/release.md](docs/release.md)：Release artifact 命名和发布规则。
+
+## 安全提醒
+
+`data_encryption = disabled` 只适合应用层已经有 SSH/TLS 等端到端保护的服务。明文 HTTP、Telnet、数据库协议等应使用 `required`。控制通道始终加密且不能关闭。
+
+ctunnel 使用自定义协议，尚未经过独立安全审计。请不要把它描述为 TLS 的替代品，也不要在高风险场景里只依赖默认示例配置。
