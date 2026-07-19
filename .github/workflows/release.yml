@@ -1,26 +1,77 @@
 name: Release
 on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version used for manual runs, without leading v
+        required: true
+        type: string
   push:
     tags: ['v*']
 permissions:
   contents: write
+
 jobs:
+  ci-smoke:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - shell: bash
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build binutils file
+      - shell: bash
+        run: |
+          python3 scripts/check-dangerous-unicode.py $(find .github scripts cmake src include tests -type f \( -name '*.yml' -o -name '*.yaml' -o -name '*.cmake' -o -name 'CMakeLists.txt' -o -name '*.sh' -o -name 'configure' -o -name 'config' -o -name '*.py' -o -name '*.[ch]' \) -print)
+          python3 scripts/kconfig/configure.py --config build/.config --build-dir build --target linux defconfig configs/default_defconfig
+          scripts/config --file build/.config --build-dir build --target linux --enable CTUNNEL_LINK_DYNAMIC
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCTUNNEL_KCONFIG_CONFIG=build/.config -DCTUNNEL_BUILD_TESTS=ON
+          cmake --build build --verbose
+          ctest --test-dir build --output-on-failure
+
   build:
+    needs: ci-smoke
     uses: ./.github/workflows/cross-build.yml
+
   release:
-    needs: build
+    needs: [ci-smoke, build]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
-          pattern: ctunnel-*
+          pattern: release-package-*
+          path: dist
           merge-multiple: true
-      - run: sha256sum ctunnel-* > SHA256SUMS
-      - run: git archive --format=tar.gz --prefix=ctunnel-${GITHUB_REF_NAME#v}/ -o ctunnel-${GITHUB_REF_NAME#v}-source.tar.gz HEAD
-      - uses: softprops/action-gh-release@v2
+      - name: Assemble release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            version='${{ inputs.version }}'
+          else
+            version=${GITHUB_REF_NAME#v}
+          fi
+          case "$version" in
+            ""|*[!A-Za-z0-9._+-]*)
+              echo "unsafe tag version: $version" >&2
+              exit 2
+              ;;
+          esac
+          git archive --format=tar.gz --prefix="ctunnel-$version/" -o "dist/ctunnel-$version-source.tar.gz" HEAD
+          find dist -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) -print0 |
+            sort -z |
+            xargs -0 sha256sum > dist/SHA256SUMS
+          test -s dist/SHA256SUMS
+          cat dist/SHA256SUMS
+      - uses: softprops/action-gh-release@v3
         with:
           files: |
-            ctunnel-*
-            SHA256SUMS
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS
           generate_release_notes: true
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && format('manual-v{0}', inputs.version) || github.ref_name }}
+          name: ${{ github.event_name == 'workflow_dispatch' && format('Manual test v{0}', inputs.version) || github.ref_name }}
+          fail_on_unmatched_files: true
+          overwrite_files: true

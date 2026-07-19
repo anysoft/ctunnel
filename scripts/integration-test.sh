@@ -6,6 +6,7 @@ root=$(mktemp -d "${TMPDIR:-/tmp}/ctunnel-it.XXXXXX")
 server_pid=
 client_pid=
 echo_pid=
+# shellcheck disable=SC2329
 cleanup() {
   [ -z "$client_pid" ] || kill "$client_pid" 2>/dev/null || true
   [ -z "$server_pid" ] || kill "$server_pid" 2>/dev/null || true

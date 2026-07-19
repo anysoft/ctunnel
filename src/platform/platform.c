@@ -104,7 +104,7 @@ int ct_socket_keepalive(ct_socket s) {
     if (setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, (const char *)&one, sizeof one) != 0)
         return -1;
 #if defined(TCP_KEEPIDLE)
-    int idle = 60, int intvl = 20, cnt = 3;
+    int idle = 60, intvl = 20, cnt = 3;
     (void)setsockopt(s, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof idle);
     (void)setsockopt(s, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof intvl);
     (void)setsockopt(s, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof cnt);

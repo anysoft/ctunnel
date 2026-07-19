@@ -7,13 +7,24 @@ if [ ! -f "$binary" ]; then
   exit 2
 fi
 
+file_tool=${CTUNNEL_FILE:-file}
+strip_tool=${CTUNNEL_STRIP:-strip}
+size_tool=${CTUNNEL_SIZE:-size}
+nm_tool=${CTUNNEL_NM:-nm}
+readelf_tool=${CTUNNEL_READELF:-readelf}
+objdump_tool=${CTUNNEL_OBJDUMP:-objdump}
+
 bytes() {
   wc -c <"$1" | tr -d ' '
 }
 
 echo "binary: $binary"
 echo "file_bytes_unstripped: $(bytes "$binary")"
-file "$binary"
+if command -v "$file_tool" >/dev/null 2>&1; then
+  "$file_tool" "$binary"
+else
+  echo "file: unavailable (tool '$file_tool' not found)"
+fi
 
 link_report=${CTUNNEL_LINK_REPORT:-$binary.link-report.txt}
 report_value() {
@@ -38,7 +49,6 @@ temporary=$(mktemp "${TMPDIR:-/tmp}/ctunnel-size.XXXXXX")
 cleanup() { rm -f "$temporary"; }
 trap cleanup EXIT INT TERM
 cp "$binary" "$temporary"
-strip_tool=${CTUNNEL_STRIP:-strip}
 if command -v "$strip_tool" >/dev/null 2>&1; then
   if [ "$(uname -s)" = Darwin ]; then
     "$strip_tool" -x "$temporary" 2>/dev/null || "$strip_tool" "$temporary"
@@ -53,20 +63,24 @@ else
 fi
 
 echo "section_sizes:"
-if [ "$(uname -s)" = Darwin ] && command -v size >/dev/null 2>&1; then
-  size -m "$binary" || true
-elif command -v size >/dev/null 2>&1; then
-  size -A "$binary" || size "$binary" || true
+if [ "$(uname -s)" = Darwin ] && command -v "$size_tool" >/dev/null 2>&1; then
+  "$size_tool" -m "$binary" || true
+elif command -v "$size_tool" >/dev/null 2>&1; then
+  "$size_tool" -A "$binary" || "$size_tool" "$binary" || true
+else
+  echo "size: unavailable (tool '$size_tool' not found)"
 fi
-if command -v readelf >/dev/null 2>&1; then
-  readelf -W -S "$binary" || true
+if command -v "$readelf_tool" >/dev/null 2>&1; then
+  "$readelf_tool" -W -S "$binary" || true
 fi
 
 echo "dynamic_dependencies:"
-if command -v readelf >/dev/null 2>&1; then
-  readelf -W -d "$binary" | grep -E 'NEEDED|RPATH|RUNPATH|interpreter' || echo "none recorded"
+if command -v "$readelf_tool" >/dev/null 2>&1; then
+  "$readelf_tool" -W -d "$binary" | grep -E 'NEEDED|RPATH|RUNPATH|interpreter' || echo "none recorded"
 elif command -v otool >/dev/null 2>&1; then
   otool -L "$binary"
+elif command -v "$objdump_tool" >/dev/null 2>&1; then
+  "$objdump_tool" -p "$binary" | grep -E 'DLL Name|NEEDED|RPATH|RUNPATH' || echo "none recorded"
 else
   echo "dependency inspection tool unavailable"
 fi
@@ -83,14 +97,20 @@ else
 fi
 
 echo "largest_symbols:"
-if nm --help 2>&1 | grep -q -- '--size-sort'; then
-  nm -S --size-sort --print-size "$binary" 2>/dev/null | tail -20 || true
+if ! command -v "$nm_tool" >/dev/null 2>&1; then
+  echo "nm: unavailable (tool '$nm_tool' not found)"
+elif "$nm_tool" --help 2>&1 | grep -q -- '--size-sort'; then
+  "$nm_tool" -S --size-sort --print-size "$binary" 2>/dev/null | tail -20 || true
 else
-  nm -nm "$binary" 2>/dev/null | tail -20 || true
+  "$nm_tool" -nm "$binary" 2>/dev/null | tail -20 || true
 fi
 
 echo "monocypher_symbols:"
-nm "$binary" 2>/dev/null | grep -E '(_| )crypto_(aead|blake2b|eddsa|x25519|verify|wipe)' || true
+if command -v "$nm_tool" >/dev/null 2>&1; then
+  "$nm_tool" "$binary" 2>/dev/null | grep -E '(_| )crypto_(aead|blake2b|eddsa|x25519|verify|wipe)' || true
+else
+  echo "nm: unavailable (tool '$nm_tool' not found)"
+fi
 
 limit_kib=${CTUNNEL_MAX_MINI_BINARY_SIZE_KIB:-0}
 if [ "$limit_kib" -gt 0 ]; then
