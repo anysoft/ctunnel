@@ -6,4 +6,6 @@
 
 当前 Release 工作流会额外生成 `linux-armv5-gnueabi-static-mini`。它使用 `arm-linux-gnueabi` 软浮点 EABI 工具链，并以 `-march=armv5te -mfloat-abi=soft` 构建，面向没有 hard-float ABI 的旧 ARM 设备。不要把 `linux-armv7-gnueabihf-*` 产物部署到这类设备上；`gnueabihf` 需要目标系统和 CPU 浮点 ABI 同时匹配。
 
+Release 不发布 ARMv5 glibc Mostly-static 包：公开 GitHub runner 的 `arm-linux-gnueabi` 工具链会引入当前 Ubuntu 的 glibc 版本需求，不能保证兼容 Buildroot/glibc 2.26 设备。需要更小的 ARMv5 glibc 2.26 Mostly-static 包时，必须使用设备 SDK 本地构建，详见 `docs/cross-compilation.md`。
+
 原生桌面/服务器平台不使用 Mini 作为默认发布档位：`linux-x86_64-mostly-static`、`linux-i686-mostly-static`、`macos-x86_64-mostly-static`、`macos-arm64-mostly-static`、`windows-x86_64-static-runtime` 和 `windows-i686-static-runtime` 使用默认功能集，包含 client、server、keygen、fingerprint、configtest 和 build-info 等日常工具。Mini 主要用于 ARM/MIPS 等小体积嵌入式产物；如果某个平台需要同时发布完整工具集和 Mini，可以新增独立 artifact，不能用 Mini 覆盖默认包。

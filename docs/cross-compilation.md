@@ -31,6 +31,8 @@ CTUNNEL_STRIP=$CTUNNEL_TOOLCHAIN_ROOT/bin/arm-buildroot-linux-gnueabi-strip \
 
 模板要求在指定位置恰好找到一个预期编译器，使用 SDK sysroot，选择同一 SDK 的 `ar`、`ranlib`、`strip`、`readelf`、`objdump` 和 `size`，并把库、头文件和包搜索限制在目标根目录。设备已有兼容 glibc 2.26 时应选择 Mostly-static；使用宿主机较新 glibc 链接的二进制并不兼容，而 glibc 全静态会显著增加体积并影响 NSS/DNS 行为。
 
+公开 GitHub Actions 的 `arm-linux-gnueabi` 工具链来自当前 Ubuntu 发行版，生成的 Mostly-static 二进制会记录较新的 glibc 版本需求，例如 `GLIBC_2.34`。这类产物不能部署到 glibc 2.26 设备。面向该设备的 Mostly-static 包必须用上面的 Buildroot SDK 构建，或在安装了同一 SDK 的私有 runner 上构建；公开 Release 只发布 ARMv5 全静态参考包，避免把新 glibc 产物误认为 Buildroot/glibc 2.26 兼容包。
+
 也可使用封装前端：
 
 ```sh
