@@ -1,0 +1,20 @@
+set(CMAKE_SYSTEM_NAME Linux)
+set(CMAKE_SYSTEM_PROCESSOR armv5)
+set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+
+set(_p "$ENV{CTUNNEL_CROSS_PREFIX}")
+if(_p STREQUAL "")
+  set(_p arm-linux-gnueabi-)
+endif()
+string(REGEX REPLACE "-+$" "" _p "${_p}")
+set(_p "${_p}-")
+
+set(CMAKE_C_COMPILER ${_p}gcc)
+set(CMAKE_AR ${_p}ar)
+set(CMAKE_RANLIB ${_p}ranlib)
+set(CMAKE_STRIP ${_p}strip)
+set(CMAKE_READELF ${_p}readelf)
+set(CMAKE_OBJDUMP ${_p}objdump)
+set(CMAKE_SIZE ${_p}size)
+
+set(CMAKE_C_FLAGS_INIT "-march=armv5te -mfloat-abi=soft")

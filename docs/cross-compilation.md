@@ -45,6 +45,6 @@ cmake --build build-arm --parallel
 
 ## 其他目标
 
-工具链模板覆盖 i686、ARMv7、AArch64、MIPS、MIPSEL 和 MinGW。编译器前缀不同时设置 `CTUNNEL_CROSS_PREFIX`。MIPS 大小端由编译器决定（`mips-...` 与 `mipsel-...`）。每次构建后都应检查架构、解释器、`NEEDED` 项和体积；二进制不能列出外部密码学库。ARM/Buildroot 全静态构建只有在该 SDK 提供所有目标 `.a` 文件时才有效，绝不能混用宿主机和目标机 libc 库。
+工具链模板覆盖 i686、ARMv5 gnueabi 软浮点、ARMv7 gnueabihf 硬浮点、AArch64、MIPS、MIPSEL 和 MinGW。编译器前缀不同时设置 `CTUNNEL_CROSS_PREFIX`。MIPS 大小端由编译器决定（`mips-...` 与 `mipsel-...`）。ARMv5 软浮点使用 `arm-linux-gnueabi` 工具链，默认编译参数为 `-march=armv5te -mfloat-abi=soft`，适合不支持 hard-float ABI 的旧 ARM 设备；不要用 `arm-linux-gnueabihf` 产物替代。每次构建后都应检查架构、解释器、`NEEDED` 项和体积；二进制不能列出外部密码学库。ARM/Buildroot 全静态构建只有在该 SDK 提供所有目标 `.a` 文件时才有效，绝不能混用宿主机和目标机 libc 库。
 
 OpenWrt 和 Buildroot 映射见 `docs/embedded-builds.md`。它们启用内置 Monocypher，不依赖密码学软件包，并把 `.config` 保存在包构建目录。MSVC 和 MinGW 编译同一份内置源码，不需要 vcpkg 包。MinGW Static 表示编译器支持运行库采用静态方式，Windows 系统 DLL 仍然存在。macOS x86_64 和 arm64 应分别构建，仅当 `.config` 完全相同时才可合并；macOS 不支持通用全静态系统程序。

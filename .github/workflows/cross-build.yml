@@ -176,6 +176,75 @@ jobs:
           path: build/**
           if-no-files-found: warn
 
+  linux-armv5-gnueabi-static:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install dependencies
+        shell: bash
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build binutils file gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi
+      - name: Environment diagnostics
+        shell: bash
+        run: |
+          uname -a
+          uname -m
+          cmake --version
+          ninja --version
+          python3 --version
+          arm-linux-gnueabi-gcc --version
+          arm-linux-gnueabi-gcc -dumpmachine
+          arm-linux-gnueabi-gcc -print-sysroot || true
+          arm-linux-gnueabi-gcc -print-file-name=libc.a || true
+          arm-linux-gnueabi-gcc -print-file-name=crt1.o || true
+      - name: Configure
+        shell: bash
+        run: |
+          echo "CTUNNEL_CROSS_PREFIX=arm-linux-gnueabi-" >> "$GITHUB_ENV"
+          python3 scripts/kconfig/configure.py --config build/.config --build-dir build --target linux defconfig configs/mini_defconfig
+          scripts/config --file build/.config --build-dir build --target linux --enable CTUNNEL_LINK_STATIC
+          cmake -S . -B build -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/linux-armv5-gnueabi.cmake -DCMAKE_BUILD_TYPE=MinSizeRel -DCTUNNEL_KCONFIG_CONFIG=build/.config -DCTUNNEL_USE_BUNDLED_MONOCYPHER=ON -DCTUNNEL_BUILD_TESTS=OFF
+      - name: Build
+        shell: bash
+        run: |
+          set -o pipefail
+          cmake --build build --verbose 2>&1 | tee build/build.log
+      - name: Verify and package
+        shell: bash
+        run: |
+          set -o pipefail
+          file build/ctunnel | tee build/architecture.txt
+          grep -E 'ARM' build/architecture.txt
+          arm-linux-gnueabi-readelf -W -h build/ctunnel | tee build/elf-header.txt
+          arm-linux-gnueabi-readelf -W -l build/ctunnel | tee build/program-headers.txt
+          arm-linux-gnueabi-readelf -W -d build/ctunnel | tee build/dynamic.txt || true
+          ! grep -Eq '(^|[[:space:]])INTERP([[:space:]]|$)' build/program-headers.txt
+          ! grep -q NEEDED build/dynamic.txt
+          CTUNNEL_NM=arm-linux-gnueabi-nm CTUNNEL_STRINGS=arm-linux-gnueabi-strings CTUNNEL_READELF=arm-linux-gnueabi-readelf scripts/check-binary-config.sh build/ctunnel server-only mini
+          CTUNNEL_FILE=file CTUNNEL_STRIP=arm-linux-gnueabi-strip CTUNNEL_SIZE=arm-linux-gnueabi-size CTUNNEL_NM=arm-linux-gnueabi-nm CTUNNEL_READELF=arm-linux-gnueabi-readelf CTUNNEL_OBJDUMP=arm-linux-gnueabi-objdump CTUNNEL_MAX_MINI_BINARY_SIZE_KIB=0 scripts/size-report.sh build/ctunnel | tee build/size-report.txt
+          version="0.1.0-dev+$(printf %s "$GITHUB_SHA" | cut -c1-12)"
+          case "$GITHUB_REF" in refs/tags/v*) version=${GITHUB_REF_NAME#v};; esac
+          CTUNNEL_STRIP=arm-linux-gnueabi-strip VERSION="$version" TARGET=linux-armv5-gnueabi-static-mini BINARY=build/ctunnel CONFIG=build/.config scripts/package.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-package-linux-armv5-gnueabi-static-mini
+          path: ctunnel-*.tar.gz
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: debug-linux-armv5-gnueabi-static-mini
+          path: |
+            build/.config
+            build/CMakeCache.txt
+            build/build.log
+            build/ctunnel.link-report.txt
+            build/architecture.txt
+            build/elf-header.txt
+            build/program-headers.txt
+            build/dynamic.txt
+            build/size-report.txt
+          if-no-files-found: warn
+
   macos-native:
     strategy:
       fail-fast: false
