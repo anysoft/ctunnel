@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 jobs:
-  linux-native-mini:
+  linux-native-default:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -27,9 +27,9 @@ jobs:
       - name: Configure
         shell: bash
         run: |
-          python3 scripts/kconfig/configure.py --config build/.config --build-dir build --target linux defconfig configs/mini_defconfig
+          python3 scripts/kconfig/configure.py --config build/.config --build-dir build --target linux defconfig configs/default_defconfig
           scripts/config --file build/.config --build-dir build --target linux --enable CTUNNEL_LINK_MOSTLY_STATIC
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=MinSizeRel -DCTUNNEL_KCONFIG_CONFIG=build/.config -DCTUNNEL_USE_BUNDLED_MONOCYPHER=ON -DCTUNNEL_BUILD_TESTS=OFF
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCTUNNEL_KCONFIG_CONFIG=build/.config -DCTUNNEL_USE_BUNDLED_MONOCYPHER=ON -DCTUNNEL_BUILD_TESTS=OFF
       - name: Build
         shell: bash
         run: |
@@ -41,20 +41,20 @@ jobs:
           set -o pipefail
           file build/ctunnel | tee build/architecture.txt
           otool -L build/ctunnel 2>/dev/null || readelf -W -d build/ctunnel | tee build/dynamic.txt || true
-          scripts/check-binary-config.sh build/ctunnel server-only mini
-          CTUNNEL_MAX_MINI_BINARY_SIZE_KIB=400 scripts/size-report.sh build/ctunnel | tee build/size-report.txt
+          scripts/check-binary-config.sh build/ctunnel both default
+          scripts/size-report.sh build/ctunnel | tee build/size-report.txt
           version="0.1.0-dev+$(printf %s "$GITHUB_SHA" | cut -c1-12)"
           case "$GITHUB_REF" in refs/tags/v*) version=${GITHUB_REF_NAME#v};; esac
-          CTUNNEL_STRIP=strip VERSION="$version" TARGET=linux-x86_64-mini BINARY=build/ctunnel CONFIG=build/.config scripts/package.sh
+          CTUNNEL_STRIP=strip VERSION="$version" TARGET=linux-x86_64-mostly-static BINARY=build/ctunnel CONFIG=build/.config scripts/package.sh
       - uses: actions/upload-artifact@v7
         with:
-          name: release-package-linux-x86_64-mini
+          name: release-package-linux-x86_64-mostly-static
           path: ctunnel-*.tar.gz
           if-no-files-found: error
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: debug-linux-x86_64-mini
+          name: debug-linux-x86_64-mostly-static
           path: |
             build/.config
             build/CMakeCache.txt
@@ -267,9 +267,9 @@ jobs:
       - name: Configure and build
         shell: bash
         run: |
-          python3 scripts/kconfig/configure.py --config build/.config --build-dir build --target darwin defconfig configs/mini_defconfig
+          python3 scripts/kconfig/configure.py --config build/.config --build-dir build --target darwin defconfig configs/macos_defconfig
           scripts/config --file build/.config --build-dir build --target darwin --enable CTUNNEL_LINK_MOSTLY_STATIC
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=MinSizeRel -DCTUNNEL_KCONFIG_CONFIG=build/.config -DCTUNNEL_BUILD_TESTS=OFF
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCTUNNEL_KCONFIG_CONFIG=build/.config -DCTUNNEL_BUILD_TESTS=OFF
           cmake --build build --parallel --verbose 2>&1 | tee build/build.log
       - name: Verify and package
         shell: bash
@@ -280,20 +280,20 @@ jobs:
           grep '${{ matrix.expect }}' build/architecture.txt
           otool -L build/ctunnel | tee build/dependencies.txt
           ! grep -Eiq 'sodium|ssl|crypto|mbedtls|monocypher' build/dependencies.txt
-          scripts/check-binary-config.sh build/ctunnel server-only mini
+          scripts/check-binary-config.sh build/ctunnel both default
           scripts/size-report.sh build/ctunnel | tee build/size-report.txt
           version="0.1.0-dev+$(printf %s "$GITHUB_SHA" | cut -c1-12)"
           case "$GITHUB_REF" in refs/tags/v*) version=${GITHUB_REF_NAME#v};; esac
-          CTUNNEL_STRIP=strip VERSION="$version" TARGET=${{ matrix.name }}-mini BINARY=build/ctunnel CONFIG=build/.config scripts/package.sh
+          CTUNNEL_STRIP=strip VERSION="$version" TARGET=${{ matrix.name }}-mostly-static BINARY=build/ctunnel CONFIG=build/.config scripts/package.sh
       - uses: actions/upload-artifact@v7
         with:
-          name: release-package-${{ matrix.name }}-mini
+          name: release-package-${{ matrix.name }}-mostly-static
           path: ctunnel-*.tar.gz
           if-no-files-found: error
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: debug-${{ matrix.name }}-mini
+          name: debug-${{ matrix.name }}-mostly-static
           path: |
             build/.config
             build/CMakeCache.txt
