@@ -118,7 +118,7 @@ CONFIG_STREAM_BUFFER_SIZE
 CONFIG_CONTROL_BUFFER_SIZE
 ```
 
-运行时 INI 值可以更小，但不能更大。ctunnel 会报告并拒绝超限值，不会截断。仅 IPv6 构建会拒绝数字形式的 IPv4 地址；单角色构建会拒绝相反模式；禁用 DATA 加密的构建会拒绝 `required`；未编译的日志级别会被拒绝；禁用工作连接池的构建会拒绝非零池大小。
+运行时 INI 值可以更小，但不能更大。ctunnel 会报告并拒绝超限值，不会截断。仅 IPv6 构建会拒绝数字形式的 IPv4 地址；单角色构建会拒绝相反模式；禁用 DATA 加密的构建会拒绝 `data_encryption=true`；未编译的日志级别会被拒绝；禁用工作连接池的构建会拒绝非零池大小。
 
 ## 部署示例
 

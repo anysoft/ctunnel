@@ -357,13 +357,17 @@ static void test_config(void) {
         "key=/tmp/x\nserver_public_key=/tmp/y\nallowed_ciphers=xchacha20-poly1305\n"
         "preferred_cipher=xchacha20-poly1305\nheartbeat_interval=2\nheartbeat_timeout=5\n"
         "[ssh]\ntype=tcp\nremote_addr=::1\nremote_port=2222\nlocal_addr=127.0.0.1\n"
-        "local_port=22\ndata_encryption=disabled\n";
+        "local_port=22\ndata_encryption=false\n"
+        "[web]\ntype=tcp\nremote_addr=::1\nremote_port=8080\nlocal_addr=127.0.0.1\n"
+        "local_port=8080\ndata_encryption=true\n";
     T(write(fd, config, strlen(config)) == (ssize_t)strlen(config));
     close(fd);
     ct_config parsed;
     char error[256];
     T(ct_config_load(path, &parsed, error, sizeof error) == 0);
-    T(parsed.service_count == 1 && parsed.services[0].remote_port == 2222);
+    T(parsed.service_count == 2 && parsed.services[0].remote_port == 2222);
+    T(parsed.services[0].encryption == CT_ENC_DISABLED);
+    T(parsed.services[1].encryption == CT_ENC_REQUIRED);
     unlink(path);
 }
 #endif

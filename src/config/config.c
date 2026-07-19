@@ -101,13 +101,15 @@ static int address_family_unavailable(const char *address) {
     return 0;
 }
 static int enc(const char *s, ct_enc_mode *out) {
-    if (!strcmp(s, "required")) {
+    if (!strcmp(s, "true") || !strcmp(s, "yes") || !strcmp(s, "on") ||
+        !strcmp(s, "enabled") || !strcmp(s, "required")) {
 #ifndef CONFIG_FEATURE_DATA_ENCRYPTION
         return -2;
 #else
         *out = CT_ENC_REQUIRED;
 #endif
-    } else if (!strcmp(s, "disabled"))
+    } else if (!strcmp(s, "false") || !strcmp(s, "no") || !strcmp(s, "off") ||
+               !strcmp(s, "disabled"))
         *out = CT_ENC_DISABLED;
     else
         return -1;
@@ -222,9 +224,15 @@ static int set_common(ct_config *c, const char *k, const char *v) {
 static int set_default_log_file(ct_config *c) {
     if (c->log_file[0])
         return 0;
-    const char *name = c->mode == CT_MODE_CLIENT ? "ctunnel-client.log"
-                     : c->mode == CT_MODE_SERVER ? "ctunnel-server.log"
-                                                 : "ctunnel.log";
+    const char *name = "ctunnel.log";
+#ifdef CONFIG_CTUNNEL_CLIENT
+    if (c->mode == CT_MODE_CLIENT)
+        name = "ctunnel-client.log";
+#endif
+#ifdef CONFIG_CTUNNEL_SERVER
+    if (c->mode == CT_MODE_SERVER)
+        name = "ctunnel-server.log";
+#endif
     const char *last_slash = strrchr(c->config_path, '/');
 #ifdef _WIN32
     const char *last_backslash = strrchr(c->config_path, '\\');

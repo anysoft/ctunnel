@@ -2,7 +2,7 @@
 
 INI 键名区分大小写。未知键、重复或无效服务、超范围整数、缺少必填字段以及不支持的服务类型都会导致配置失败。只有授权文件允许重复出现 `allow_remote_port`。
 
-运行时配置不能增加 `.config` 在编译期裁剪掉的能力。单角色构建会拒绝相反的 `mode`；仅 IPv6 构建会拒绝数字形式的 IPv4 地址；未编译转发加密的构建会拒绝 `data_encryption=required`；未编译工作连接池的构建要求 `pool_count=0`；高于编译期上限的日志级别无效。资源数值不得超过 `docs/build-configuration.md` 列出的生成期硬限制。
+运行时配置不能增加 `.config` 在编译期裁剪掉的能力。单角色构建会拒绝相反的 `mode`；仅 IPv6 构建会拒绝数字形式的 IPv4 地址；未编译转发加密的构建会拒绝 `data_encryption=true`；未编译工作连接池的构建要求 `pool_count=0`；高于编译期上限的日志级别无效。资源数值不得超过 `docs/build-configuration.md` 列出的生成期硬限制。
 
 Mini 服务端包的上限通常是 `max_clients=1`、`max_services_per_client=4`、`max_streams_per_client=8`、`max_pending_streams=4`，并且最高只接受 `log_level=warn`。如果把完整包示例中的 4/16/64 限制直接复制到 Mini 二进制，会在配置解析阶段失败。Release 包中的 `ctunnel.config` 是排查这类问题的准确信息来源。
 
@@ -12,6 +12,8 @@ Mini 服务端包的上限通常是 `max_clients=1`、`max_services_per_client=4
 
 日志默认同时写到标准错误和配置文件同目录的文件：服务端为 `ctunnel-server.log`，客户端为 `ctunnel-client.log`。可用 `log_file=/path/to/file.log` 指定位置；设为 `-` 或 `stderr` 时只写标准错误。日志按日期轮转为 `文件名.YYYYMMDD`，`log_rotate_days=7` 默认保留 7 天，设为 `0` 表示不清理旧轮转文件。启动成功提示不受编译期日志等级裁剪影响；普通日志仍受 `CONFIG_LOG_MAX_LEVEL_*` 限制。
 
-每个客户端服务段只接受 `type=tcp`、`remote_addr`、`remote_port`、`local_addr`、`local_port` 和 `data_encryption=required|disabled`。服务端授权段 `[client.ID]` 接受公钥路径、精确的 `allow_bind_addr`（或 `*`）、一个或多个单端口/端口范围，以及该身份专属的限制。
+地址值 `*` 表示 wildcard。对于监听地址，`bind_addr=*` 和 `remote_addr=*` 在 IPv4+IPv6 构建中会同时监听 `0.0.0.0` 与 `::`；单栈构建会退化为可用地址族。只想绑定单协议族时请明确写 `0.0.0.0` 或 `::`。服务端授权中的 `allow_bind_addr=*` 表示允许客户端注册任意监听地址。
 
-第一期只接受 `allowed_ciphers=xchacha20-poly1305` 和 `preferred_cipher=xchacha20-poly1305`。AES-GCM 及其他名称都会导致配置错误。控制通道强制加密。DATA `disabled` 只影响应用数据记录；工作连接和流绑定仍会经过认证。
+每个客户端服务段只接受 `type=tcp`、`remote_addr`、`remote_port`、`local_addr`、`local_port` 和 `data_encryption=true|false`。`default_data_encryption` 是客户端服务段的默认值。兼容旧配置，`required`/`enabled`/`yes`/`on` 等价于 `true`，`disabled`/`no`/`off` 等价于 `false`。服务端授权段 `[client.ID]` 接受公钥路径、精确的 `allow_bind_addr`（或 `*`）、一个或多个单端口/端口范围，以及该身份专属的限制。
+
+第一期只接受 `allowed_ciphers=xchacha20-poly1305` 和 `preferred_cipher=xchacha20-poly1305`。AES-GCM 及其他名称都会导致配置错误。控制通道强制加密。`data_encryption=false` 只影响应用数据记录；工作连接和流绑定仍会经过认证。

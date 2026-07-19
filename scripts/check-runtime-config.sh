@@ -48,7 +48,7 @@ identity_private_key = missing
 authorized_clients_file = missing
 bind_addr = ::1
 max_clients = 1
-default_data_encryption = required
+default_data_encryption = true
 EOF
   expect_failure encryption 'encryption|unavailable|compiled'
 

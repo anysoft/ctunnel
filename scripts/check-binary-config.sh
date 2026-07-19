@@ -20,7 +20,7 @@ case "$role" in
       echo "client entry point found in server-only binary" >&2
       exit 1
     fi
-    if grep -q 'ctunnel-client' "$texts"; then
+    if grep -Fxq 'ctunnel-client' "$texts"; then
       echo "client alias found in server-only binary" >&2
       exit 1
     fi
@@ -30,7 +30,7 @@ case "$role" in
       echo "server entry point found in client-only binary" >&2
       exit 1
     fi
-    if grep -q 'ctunnel-server' "$texts"; then
+    if grep -Fxq 'ctunnel-server' "$texts"; then
       echo "server alias found in client-only binary" >&2
       exit 1
     fi

@@ -86,14 +86,14 @@ remote_addr = ::1
 remote_port = $remote_encrypted_port
 local_addr = 127.0.0.1
 local_port = $local_echo_port
-data_encryption = required
+data_encryption = true
 [echo-raw]
 type = tcp
 remote_addr = ::1
 remote_port = $remote_raw_port
 local_addr = 127.0.0.1
 local_port = $local_echo_port
-data_encryption = disabled
+data_encryption = false
 EOF
 "$bin" -t -c "$root/server.ini" >/dev/null
 "$bin" -t -c "$root/client.ini" >/dev/null

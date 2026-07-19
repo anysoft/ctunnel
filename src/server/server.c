@@ -22,8 +22,13 @@
 typedef struct server_peer server_peer;
 typedef struct {
     ct_service_config cfg;
-    ct_socket listen_fd;
+    ct_socket listen_fd[2];
+    size_t listen_n;
 } server_service;
+typedef struct {
+    ct_socket fd[2];
+    size_t n;
+} listen_set;
 typedef struct {
     ct_socket fd;
     server_service *svc;
@@ -79,7 +84,8 @@ static void peer_close(server_peer *p) {
     (void)ct_control_send(&p->ctl, CT_MSG_GOAWAY, 0, NULL, 0, 100);
     ct_socket_close(p->ctl.fd);
     for (size_t i = 0; i < p->svc_n; i++)
-        ct_socket_close(p->svc[i].listen_fd);
+        for (size_t j = 0; j < p->svc[i].listen_n; j++)
+            ct_socket_close(p->svc[i].listen_fd[j]);
     for (size_t i = 0; i < p->work_n; i++)
         ct_socket_close(p->work[i]);
     for (size_t i = 0; i < p->pending_n; i++)
@@ -94,6 +100,38 @@ static void peer_close(server_peer *p) {
         p->relays[i].direct = CT_INVALID_SOCKET;
         p->relays[i].work = CT_INVALID_SOCKET;
     }
+}
+
+static int listen_set_open(listen_set *set, const char *addr, uint16_t port, int backlog) {
+    memset(set, 0, sizeof *set);
+    for (size_t i = 0; i < sizeof set->fd / sizeof set->fd[0]; i++)
+        set->fd[i] = CT_INVALID_SOCKET;
+    if (!strcmp(addr, "*")) {
+#ifdef CONFIG_FEATURE_IPV4
+        set->fd[set->n] = ct_net_listen("0.0.0.0", port, backlog);
+        if (set->fd[set->n] != CT_INVALID_SOCKET)
+            set->n++;
+#endif
+#ifdef CONFIG_FEATURE_IPV6
+        set->fd[set->n] = ct_net_listen("::", port, backlog);
+        if (set->fd[set->n] != CT_INVALID_SOCKET)
+            set->n++;
+#endif
+        if (set->n)
+            return 0;
+        return -1;
+    }
+    set->fd[0] = ct_net_listen(addr, port, backlog);
+    if (set->fd[0] == CT_INVALID_SOCKET)
+        return -1;
+    set->n = 1;
+    return 0;
+}
+
+static void listen_set_close(listen_set *set) {
+    for (size_t i = 0; i < set->n; i++)
+        ct_socket_close(set->fd[i]);
+    memset(set, 0, sizeof *set);
 }
 static server_peer *find_session(server_peer *p, size_t n, uint64_t sid) {
     for (size_t i = 0; i < n; i++)
@@ -151,8 +189,9 @@ static int register_service(server_peer *p, const ct_config *cfg, const uint8_t 
         ok = 0;
         why = "NOT_AUTHORIZED";
     }
-    ct_socket l = CT_INVALID_SOCKET;
-    if (ok && (l = ct_net_listen(s.remote_addr, s.remote_port, 128)) == CT_INVALID_SOCKET) {
+    listen_set listeners;
+    memset(&listeners, 0, sizeof listeners);
+    if (ok && listen_set_open(&listeners, s.remote_addr, s.remote_port, 128)) {
         ok = 0;
         why = "BIND_FAILED";
     }
@@ -161,11 +200,16 @@ static int register_service(server_peer *p, const ct_config *cfg, const uint8_t 
         server_service *ss = &p->svc[p->svc_n++];
         memset(ss, 0, sizeof *ss);
         ss->cfg = s;
-        ss->listen_fd = l;
+        ss->listen_n = listeners.n;
+        for (size_t i = 0; i < listeners.n; i++) {
+            ss->listen_fd[i] = listeners.fd[i];
+            listeners.fd[i] = CT_INVALID_SOCKET;
+        }
         CT_LOGI("server", "client_id=%s service_id=%s listening=%s:%u", p->ctl.client_id, s.id,
                 s.remote_addr, s.remote_port);
         return ct_control_send(&p->ctl, CT_MSG_REGISTER_OK, 0, reply, z, 5000);
     }
+    listen_set_close(&listeners);
     ct_pack_string(reply, sizeof reply, &z, why, 80);
     CT_LOGW("server", "client_id=%s service_id=%s registration failed: %s", p->ctl.client_id, s.id,
             why);
@@ -257,7 +301,7 @@ static int first_type(ct_socket f, uint8_t *t, uint64_t *sid) {
 int ct_run_server(const ct_config *cfg) {
     ct_runtime_init();
     const size_t event_capacity =
-        1u + (size_t)CT_MAX_AUTH_CLIENTS * (1u + CT_MAX_SERVICES + 2u * MAX_RELAYS);
+        2u + (size_t)CT_MAX_AUTH_CLIENTS * (1u + 2u * CT_MAX_SERVICES + 2u * MAX_RELAYS);
     auth_rate *rates = calloc(CONFIG_MAX_CLIENTS * 2u, sizeof *rates);
     server_peer *peers = calloc(CT_MAX_AUTH_CLIENTS, sizeof *peers);
     ref *refs = calloc(event_capacity, sizeof *refs);
@@ -275,8 +319,8 @@ int ct_run_server(const ct_config *cfg) {
             peers[i].relays[j].direct = CT_INVALID_SOCKET;
             peers[i].relays[j].work = CT_INVALID_SOCKET;
         }
-    ct_socket listener = ct_net_listen(cfg->bind_addr, cfg->bind_port, 128);
-    if (listener == CT_INVALID_SOCKET) {
+    listen_set control_listeners;
+    if (listen_set_open(&control_listeners, cfg->bind_addr, cfg->bind_port, 128)) {
         CT_LOGE("server", "cannot listen on %s:%u", cfg->bind_addr, cfg->bind_port);
         free(rates);
         free(peers);
@@ -296,8 +340,10 @@ int ct_run_server(const ct_config *cfg) {
         if (!loop)
             break;
         size_t rn = 0;
-        refs[rn] = (ref){REF_ACCEPT, NULL, NULL};
-        event_loop_add(loop, listener, CT_EV_READ, &refs[rn++]);
+        for (size_t i = 0; i < control_listeners.n; i++) {
+            refs[rn] = (ref){REF_ACCEPT, NULL, (void *)(uintptr_t)control_listeners.fd[i]};
+            event_loop_add(loop, control_listeners.fd[i], CT_EV_READ, &refs[rn++]);
+        }
         for (size_t i = 0; i < CT_MAX_AUTH_CLIENTS; i++) {
             server_peer *p = &peers[i];
             if (!p->active)
@@ -305,8 +351,10 @@ int ct_run_server(const ct_config *cfg) {
             refs[rn] = (ref){REF_CONTROL, p, NULL};
             event_loop_add(loop, p->ctl.fd, CT_EV_READ, &refs[rn++]);
             for (size_t j = 0; j < p->svc_n; j++) {
-                refs[rn] = (ref){REF_SERVICE, p, &p->svc[j]};
-                event_loop_add(loop, p->svc[j].listen_fd, CT_EV_READ, &refs[rn++]);
+                for (size_t k = 0; k < p->svc[j].listen_n; k++) {
+                    refs[rn] = (ref){REF_SERVICE, p, &p->svc[j]};
+                    event_loop_add(loop, p->svc[j].listen_fd[k], CT_EV_READ, &refs[rn++]);
+                }
             }
             for (size_t j = 0; j < MAX_RELAYS; j++)
                 if (!p->relays[j].closed) {
@@ -324,7 +372,7 @@ int ct_run_server(const ct_config *cfg) {
             ref *r = (ref *)events[ei].user;
             if (r->kind == REF_ACCEPT) {
                 char remote[CT_MAX_ADDR + 1] = "?";
-                ct_socket f = ct_net_accept(listener, remote, sizeof remote);
+                ct_socket f = ct_net_accept((ct_socket)(uintptr_t)r->ptr, remote, sizeof remote);
                 if (f == CT_INVALID_SOCKET)
                     continue;
                 uint8_t typ;
@@ -375,7 +423,9 @@ int ct_run_server(const ct_config *cfg) {
             } else if (r->kind == REF_SERVICE) {
                 server_peer *p = r->peer;
                 server_service *s = (server_service *)r->ptr;
-                ct_socket f = ct_net_accept(s->listen_fd, NULL, 0);
+                ct_socket f = CT_INVALID_SOCKET;
+                for (size_t i = 0; i < s->listen_n && f == CT_INVALID_SOCKET; i++)
+                    f = ct_net_accept(s->listen_fd[i], NULL, 0);
                 if (f != CT_INVALID_SOCKET) {
                     if (p->pending_n >= (size_t)cfg->max_pending_streams ||
                         p->pending_n == MAX_PENDING ||
@@ -424,7 +474,7 @@ int ct_run_server(const ct_config *cfg) {
     }
     for (size_t i = 0; i < CT_MAX_AUTH_CLIENTS; i++)
         peer_close(&peers[i]);
-    ct_socket_close(listener);
+    listen_set_close(&control_listeners);
     free(rates);
     free(peers);
     free(refs);

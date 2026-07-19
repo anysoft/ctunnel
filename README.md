@@ -10,7 +10,7 @@
 - 多服务配置：一个客户端可注册多个 TCP 服务。
 - 公钥身份认证：服务端和客户端都使用固定公钥验证对端。
 - 控制通道加密：控制帧始终认证加密并防重放。
-- DATA 加密可选：每个服务可设置 `data_encryption = required` 或 `disabled`。
+- DATA 加密可选：每个服务可设置 `data_encryption = true` 或 `false`。
 - 自动重连：客户端断线后自动重连并重新注册服务。
 - 可裁剪构建：可选择 client/server/both、Mini/default/full、动态/半静态/全静态链接。
 
@@ -55,7 +55,7 @@ ctunnel keygen --private client.key --public client.pub
 ```ini
 [common]
 mode = server
-bind_addr = ::
+bind_addr = *
 bind_port = 7000
 identity_private_key = /etc/ctunnel/server.key
 authorized_clients_file = /etc/ctunnel/clients.ini
@@ -74,12 +74,14 @@ server_public_key = /etc/ctunnel/server.pub
 
 [ssh]
 type = tcp
-remote_addr = ::
+remote_addr = *
 remote_port = 2222
 local_addr = 127.0.0.1
 local_port = 22
-data_encryption = disabled
+data_encryption = false
 ```
+
+`bind_addr = *` 和 `remote_addr = *` 表示同时监听 IPv4 wildcard 与 IPv6 wildcard；如果二进制只编译了其中一种地址族，就使用可用的那一种。只想绑定单协议族时可以明确写 `0.0.0.0` 或 `::`。
 
 启动前建议先检查配置：
 
@@ -188,6 +190,6 @@ cmake --build build-arm --parallel
 
 ## 安全提醒
 
-`data_encryption = disabled` 只适合应用层已经有 SSH/TLS 等端到端保护的服务。明文 HTTP、Telnet、数据库协议等应使用 `required`。控制通道始终加密且不能关闭。
+`data_encryption = false` 只适合应用层已经有 SSH/TLS 等端到端保护的服务。明文 HTTP、Telnet、数据库协议等应使用 `true`。控制通道始终加密且不能关闭。
 
 ctunnel 使用自定义协议，尚未经过独立安全审计。请不要把它描述为 TLS 的替代品，也不要在高风险场景里只依赖默认示例配置。

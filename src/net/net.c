@@ -105,8 +105,8 @@ static ct_socket gai_sock(const char *addr, uint16_t port, int passive, int time
             continue;
         int one = 1;
         (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&one, sizeof one);
-#if defined(CONFIG_FEATURE_IPV6) && !defined(CONFIG_FEATURE_IPV4)
-        if (it->ai_family == AF_INET6)
+#ifdef CONFIG_FEATURE_IPV6
+        if (passive && it->ai_family == AF_INET6)
             (void)setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, (const char *)&one, sizeof one);
 #endif
         if (ct_socket_nonblock(fd)) {
