@@ -31,6 +31,7 @@ static void defaults(ct_config *c) {
     c->reconnect_max_delay = 30;
     c->reconnect_jitter_percent = 20;
     c->pool_count = CONFIG_DEFAULT_POOL_COUNT;
+    c->log_rotate_days = 7;
     c->max_clients = CONFIG_MAX_CLIENTS;
     c->max_services_per_client = CONFIG_MAX_SERVICES;
     c->max_streams_per_client = CONFIG_DEFAULT_MAX_STREAMS;
@@ -147,6 +148,7 @@ static int set_common(ct_config *c, const char *k, const char *v) {
     STR("identity_private_key", identity_private_key);
     STR("server_public_key", server_public_key);
     STR("authorized_clients_file", authorized_clients_file);
+    STR("log_file", log_file);
 #undef STR
     if (!strcmp(k, "mode")) {
         if (!strcmp(v, "server")) {
@@ -208,6 +210,7 @@ static int set_common(ct_config *c, const char *k, const char *v) {
     INT("max_services_per_client", max_services_per_client, 1, CT_MAX_SERVICES);
     INT("max_streams_per_client", max_streams_per_client, 1, CONFIG_MAX_STREAMS);
     INT("max_pending_streams", max_pending_streams, 1, CONFIG_MAX_PENDING_STREAMS);
+    INT("log_rotate_days", log_rotate_days, 0, 3650);
 #undef INT
     if (!strcmp(k, "control_encryption"))
         return strcmp(v, "required") ? -1 : 0;
@@ -215,6 +218,30 @@ static int set_common(ct_config *c, const char *k, const char *v) {
         return strcmp(v, "public-key") ? -1 : 0;
     return 1;
 }
+
+static int set_default_log_file(ct_config *c) {
+    if (c->log_file[0])
+        return 0;
+    const char *name = c->mode == CT_MODE_CLIENT ? "ctunnel-client.log"
+                     : c->mode == CT_MODE_SERVER ? "ctunnel-server.log"
+                                                 : "ctunnel.log";
+    const char *last_slash = strrchr(c->config_path, '/');
+#ifdef _WIN32
+    const char *last_backslash = strrchr(c->config_path, '\\');
+    if (!last_slash || (last_backslash && last_backslash > last_slash))
+        last_slash = last_backslash;
+#endif
+    if (!last_slash)
+        return cp(c->log_file, sizeof c->log_file, name);
+    size_t dir_len = (size_t)(last_slash - c->config_path + 1);
+    size_t name_len = strlen(name);
+    if (dir_len + name_len >= sizeof c->log_file)
+        return -1;
+    memcpy(c->log_file, c->config_path, dir_len);
+    memcpy(c->log_file + dir_len, name, name_len + 1);
+    return 0;
+}
+
 static int set_service(ct_service_config *s, const char *k, const char *v) {
     if (!strcmp(k, "type")) {
         if (!strcmp(v, "tcp"))
@@ -331,6 +358,10 @@ int ct_config_load(const char *path, ct_config *c, char *err, size_t en) {
         goto out;
     }
 #endif
+    if (set_default_log_file(c)) {
+        snprintf(err, en, "default log file path is too long");
+        goto out;
+    }
     rc = ct_config_validate(c, err, en);
 out:
     fclose(f);

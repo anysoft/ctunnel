@@ -62,6 +62,8 @@ make olddefconfig
 make
 ```
 
+`--with-log-level` 设置的是编译期最高日志级别，同时也是默认运行时日志级别。若编译为 `warn`，配置文件中的 `log_level=info` 会不可用，info/debug/trace 级别的普通日志也不会进入二进制。需要运行期可切到 info 时，应使用 `--with-log-level=info` 或更高。
+
 常用资源参数会映射到编译期 Kconfig 硬限制或运行时默认值：
 
 | configure 参数 | Kconfig 符号 |

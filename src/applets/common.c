@@ -71,5 +71,9 @@ int ct_applet_run_role(int argc, char **argv, ct_mode expected,
         return 1;
     }
     ct_log_set_level(config.log_level);
+    if (ct_log_configure(config.log_file, config.log_rotate_days)) {
+        fprintf(stderr, "%s: cannot use log_file: %s\n", argv[0], config.log_file);
+        return 1;
+    }
     return runner(&config);
 }

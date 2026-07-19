@@ -115,6 +115,8 @@ ctunnel --version
 
 实际可用命令取决于编译配置。Mini 包可能只包含 `server`、`--help` 和 `--version`。
 
+默认日志会同时输出到终端和配置文件同目录：服务端为 `ctunnel-server.log`，客户端为 `ctunnel-client.log`。可在 `[common]` 中设置 `log_file` 和 `log_rotate_days` 调整日志文件位置和保留天数。
+
 ## 从源码构建
 
 依赖：

@@ -84,6 +84,9 @@ static int client_session(const ct_config *cfg) {
         ct_socket_close(f);
         return -1;
     }
+    ct_log_status("client", "started client_id=%s server=%s:%u services=%zu log_file=%s",
+                  cfg->client_id, cfg->server_addr, cfg->server_port, cfg->service_count,
+                  cfg->log_file[0] ? cfg->log_file : "stderr");
     const size_t event_capacity = 1u + MAX_WORK + 2u * MAX_RELAYS;
     work = calloc(MAX_WORK, sizeof *work);
     relays = calloc(MAX_RELAYS, sizeof *relays);

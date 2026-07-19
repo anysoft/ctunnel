@@ -49,14 +49,15 @@ typedef struct {
     char bind_addr[CT_MAX_ADDR + 1], server_addr[CT_MAX_ADDR + 1];
     uint16_t bind_port, server_port;
     char client_id[CT_MAX_CLIENT_ID + 1], identity_private_key[CT_MAX_PATH],
-        server_public_key[CT_MAX_PATH], authorized_clients_file[CT_MAX_PATH];
+        server_public_key[CT_MAX_PATH], authorized_clients_file[CT_MAX_PATH],
+        log_file[CT_MAX_PATH];
     unsigned cipher_mask;
     ct_cipher preferred_cipher;
     int heartbeat_interval, heartbeat_timeout, handshake_timeout, connect_timeout;
     int reconnect_initial_delay, reconnect_max_delay, reconnect_jitter_percent, pool_count;
     int max_clients, max_services_per_client, max_streams_per_client, max_pending_streams;
     ct_enc_mode default_data_encryption;
-    int log_level;
+    int log_level, log_rotate_days;
     ct_service_config services[CT_MAX_SERVICES];
     size_t service_count;
     ct_authorized_client clients[CT_MAX_AUTH_CLIENTS];

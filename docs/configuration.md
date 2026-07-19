@@ -10,6 +10,8 @@ Mini 服务端包的上限通常是 `max_clients=1`、`max_services_per_client=4
 
 客户端通用键包括：`mode`、`server_addr`、`server_port`、`client_id`、身份密钥和服务端公钥路径、密码套件设置、心跳/握手/连接超时、重连延迟和抖动、`pool_count`、默认 DATA 加密模式，以及日志级别。
 
+日志默认同时写到标准错误和配置文件同目录的文件：服务端为 `ctunnel-server.log`，客户端为 `ctunnel-client.log`。可用 `log_file=/path/to/file.log` 指定位置；设为 `-` 或 `stderr` 时只写标准错误。日志按日期轮转为 `文件名.YYYYMMDD`，`log_rotate_days=7` 默认保留 7 天，设为 `0` 表示不清理旧轮转文件。启动成功提示不受编译期日志等级裁剪影响；普通日志仍受 `CONFIG_LOG_MAX_LEVEL_*` 限制。
+
 每个客户端服务段只接受 `type=tcp`、`remote_addr`、`remote_port`、`local_addr`、`local_port` 和 `data_encryption=required|disabled`。服务端授权段 `[client.ID]` 接受公钥路径、精确的 `allow_bind_addr`（或 `*`）、一个或多个单端口/端口范围，以及该身份专属的限制。
 
 第一期只接受 `allowed_ciphers=xchacha20-poly1305` 和 `preferred_cipher=xchacha20-poly1305`。AES-GCM 及其他名称都会导致配置错误。控制通道强制加密。DATA `disabled` 只影响应用数据记录；工作连接和流绑定仍会经过认证。

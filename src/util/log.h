@@ -10,9 +10,11 @@ enum {
     CT_LOG_LEVEL_TRACE
 };
 void ct_log_set_level(int level);
+int ct_log_configure(const char *path, int rotate_days);
 int ct_log_parse_level(const char *s);
 const char *ct_log_level_name(int level);
 void ct_log_write(int level, const char *module, const char *fmt, ...);
+void ct_log_status(const char *module, const char *fmt, ...);
 #ifdef CONFIG_LOG_ERROR
 #define CT_LOG_ERROR(m, ...) ct_log_write(CT_LOG_LEVEL_ERROR, m, __VA_ARGS__)
 #else
