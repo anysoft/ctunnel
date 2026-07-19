@@ -331,9 +331,9 @@ int ct_run_server(const ct_config *cfg) {
     ct_log_status("server",
                   "started control=%s:%u clients=%d services_per_client=%d streams_per_client=%d "
                   "pending=%d log_file=%s",
-                  cfg->bind_addr, cfg->bind_port, cfg->max_clients,
-                  cfg->max_services_per_client, cfg->max_streams_per_client,
-                  cfg->max_pending_streams, cfg->log_file[0] ? cfg->log_file : "stderr");
+                  cfg->bind_addr, cfg->bind_port, cfg->max_clients, cfg->max_services_per_client,
+                  cfg->max_streams_per_client, cfg->max_pending_streams,
+                  cfg->log_file[0] ? cfg->log_file : "stderr");
     CT_LOGI("server", "control listening on %s:%u", cfg->bind_addr, cfg->bind_port);
     while (!ct_runtime_should_stop()) {
         ct_event_loop *loop = event_loop_create(event_capacity);

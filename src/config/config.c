@@ -101,8 +101,8 @@ static int address_family_unavailable(const char *address) {
     return 0;
 }
 static int enc(const char *s, ct_enc_mode *out) {
-    if (!strcmp(s, "true") || !strcmp(s, "yes") || !strcmp(s, "on") ||
-        !strcmp(s, "enabled") || !strcmp(s, "required")) {
+    if (!strcmp(s, "true") || !strcmp(s, "yes") || !strcmp(s, "on") || !strcmp(s, "enabled") ||
+        !strcmp(s, "required")) {
 #ifndef CONFIG_FEATURE_DATA_ENCRYPTION
         return -2;
 #else

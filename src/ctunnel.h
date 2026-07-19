@@ -49,8 +49,7 @@ typedef struct {
     char bind_addr[CT_MAX_ADDR + 1], server_addr[CT_MAX_ADDR + 1];
     uint16_t bind_port, server_port;
     char client_id[CT_MAX_CLIENT_ID + 1], identity_private_key[CT_MAX_PATH],
-        server_public_key[CT_MAX_PATH], authorized_clients_file[CT_MAX_PATH],
-        log_file[CT_MAX_PATH];
+        server_public_key[CT_MAX_PATH], authorized_clients_file[CT_MAX_PATH], log_file[CT_MAX_PATH];
     unsigned cipher_mask;
     ct_cipher preferred_cipher;
     int heartbeat_interval, heartbeat_timeout, handshake_timeout, connect_timeout;
