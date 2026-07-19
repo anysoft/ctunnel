@@ -180,6 +180,17 @@ int ct_relay_process(ct_relay *r, ct_socket f, int ev) {
         return -1;
     if ((ev & 2) && flush(f, f == r->direct ? &r->to_direct : &r->to_work))
         goto bad;
+#ifdef CONFIG_FEATURE_DATA_ENCRYPTION
+    /*
+     * Encrypted work input may contain complete records that could not be
+     * decrypted earlier because the direct-side output ring was full. A later
+     * direct-side flush creates room, but no new work-side read event is
+     * guaranteed to arrive. Drain again here to avoid large responses stalling
+     * after only a prefix reaches the browser/client.
+     */
+    if (f == r->direct && r->encrypted && r->work_input.len && decrypt_ready(r))
+        goto bad;
+#endif
     if (ev & 1) {
         if ((f == r->direct ? read_direct(r) : read_work(r)))
             goto bad;

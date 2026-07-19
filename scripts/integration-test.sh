@@ -102,9 +102,14 @@ CTUNNEL_ECHO_PORT=$local_echo_port python3 -c 'import os,socket
 s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);s.bind(("127.0.0.1",int(os.environ["CTUNNEL_ECHO_PORT"])));s.listen()
 while True:
  c,_=s.accept()
+ first=True
  while True:
   b=c.recv(65536)
   if not b: break
+  if first and b==b"ctunnel-large-response":
+   c.sendall((b"0123456789abcdef"*32768))
+   break
+  first=False
   c.sendall(b)
  c.close()' & echo_pid=$!
 "$bin" -c "$root/client.ini" >"$root/client.log" 2>&1 & client_pid=$!
@@ -131,6 +136,21 @@ def once(i):
    out+=chunk
   assert out==msg
 with concurrent.futures.ThreadPoolExecutor(max_workers=6) as x: list(x.map(once,range(6)))' 2>/dev/null; then
+    CTUNNEL_REMOTE_ENCRYPTED_PORT=$remote_encrypted_port python3 -c 'import os,socket,signal
+signal.alarm(8)
+p=int(os.environ["CTUNNEL_REMOTE_ENCRYPTED_PORT"])
+want=b"0123456789abcdef"*32768
+with socket.create_connection(("::1",p),.5) as s:
+ s.settimeout(1)
+ s.sendall(b"ctunnel-large-response")
+ s.shutdown(socket.SHUT_WR)
+ out=bytearray()
+ while len(out)<len(want):
+  chunk=s.recv(65536)
+  if not chunk: raise RuntimeError("connection closed before large response completed")
+  out.extend(chunk)
+ assert bytes(out)==want
+' 2>/dev/null
     kill "$client_pid"
     wait_for_exit "$client_pid"
     client_pid=
