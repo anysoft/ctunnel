@@ -1,0 +1,121 @@
+source "src/client/Kconfig"
+source "src/server/Kconfig"
+source "src/net/Kconfig"
+source "src/crypto/Kconfig"
+source "src/config/Kconfig"
+source "src/log/Kconfig"
+source "src/platform/Kconfig"
+source "src/tools/Kconfig"
+
+menu "Compile-time resource limits"
+
+config MAX_CLIENTS
+	int "Maximum authorized clients"
+	range 1 64
+	default 4
+
+config MAX_SERVICES
+	int "Maximum services"
+	range 1 256
+	default 16
+
+config MAX_STREAMS
+	int "Maximum concurrent streams"
+	range 1 4096
+	default 64
+
+config MAX_PENDING_STREAMS
+	int "Maximum pending public connections"
+	range 1 1024
+	default 16
+
+config MAX_FRAME_SIZE
+	int "Maximum protocol frame size"
+	range 4096 1048576
+	default 1048576
+
+config MAX_CLIENT_ID_LENGTH
+	int "Maximum client ID length"
+	range 8 256
+	default 64
+
+config MAX_SERVICE_ID_LENGTH
+	int "Maximum service ID length"
+	range 8 256
+	default 64
+
+config MAX_ADDRESS_LENGTH
+	int "Maximum address length"
+	range 16 512
+	default 128
+
+config MAX_PATH_LENGTH
+	int "Maximum path length"
+	range 64 2048
+	default 512
+
+config MAX_PORT_RANGES
+	int "Maximum authorized port ranges"
+	range 1 128
+	default 32
+
+config STREAM_BUFFER_SIZE
+	int "Relay I/O buffer size"
+	range 4096 262144
+	default 65536
+
+config CONTROL_BUFFER_SIZE
+	int "Control-channel scratch buffer size"
+	range 256 65536
+	default 4096
+
+config DEFAULT_MAX_STREAMS
+	int "Default runtime stream limit"
+	range 1 MAX_STREAMS
+	default 64
+
+config DEFAULT_MAX_PENDING_STREAMS
+	int "Default runtime pending limit"
+	range 1 MAX_PENDING_STREAMS
+	default 16
+
+config DEFAULT_POOL_COUNT
+	int "Default idle work-connection pool"
+	range 0 64
+	default 2 if FEATURE_WORK_POOL
+	default 0
+
+config DEFAULT_POOL_MIN
+	int "Default minimum work-connection pool"
+	range 0 64
+	default 1 if FEATURE_WORK_POOL
+	default 0
+
+config DEFAULT_POOL_MAX
+	int "Default maximum work-connection pool"
+	range 0 64
+	default 8 if FEATURE_WORK_POOL
+	default 0
+
+config MINI_MAX_BINARY_SIZE_KIB
+	int "Maximum stripped Mini binary size (KiB)"
+	range 64 2048
+	default 400
+
+endmenu
+
+menu "Development diagnostics"
+
+config FEATURE_ASSERTIONS
+	bool "Internal assertions"
+	default n
+
+config FEATURE_PROTOCOL_DIAGNOSTICS
+	bool "Detailed protocol diagnostics"
+	default n
+
+config FEATURE_TEST_HOOKS
+	bool "Test-only hooks"
+	default n
+
+endmenu

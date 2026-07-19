@@ -1,0 +1,46 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 16,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "default",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/preset-default",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CTUNNEL_KCONFIG_CONFIG": "${sourceDir}/build/preset-default/.config",
+        "CTUNNEL_DEFCONFIG": "${sourceDir}/configs/default_defconfig"
+      }
+    },
+    {
+      "name": "mini",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/preset-mini",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "MinSizeRel",
+        "CTUNNEL_KCONFIG_CONFIG": "${sourceDir}/build/preset-mini/.config",
+        "CTUNNEL_DEFCONFIG": "${sourceDir}/configs/mini_defconfig",
+        "CTUNNEL_BUILD_TESTS": "OFF"
+      }
+    },
+    {
+      "name": "full",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/preset-full",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CTUNNEL_KCONFIG_CONFIG": "${sourceDir}/build/preset-full/.config",
+        "CTUNNEL_DEFCONFIG": "${sourceDir}/configs/full_defconfig"
+      }
+    }
+  ],
+  "buildPresets": [
+    {"name": "default", "configurePreset": "default"},
+    {"name": "mini", "configurePreset": "mini"},
+    {"name": "full", "configurePreset": "full"}
+  ]
+}

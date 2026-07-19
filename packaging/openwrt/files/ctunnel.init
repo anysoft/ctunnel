@@ -1,0 +1,11 @@
+#!/bin/sh /etc/rc.common
+USE_PROCD=1
+START=95
+STOP=10
+start_service() {
+  procd_open_instance
+  procd_set_param command /usr/bin/ctunnel -c /etc/ctunnel/ctunnel.ini
+  procd_set_param respawn
+  procd_set_param limits nofile="4096 4096"
+  procd_close_instance
+}

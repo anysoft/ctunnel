@@ -1,0 +1,135 @@
+name: Cross builds
+on:
+  workflow_call:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ['v*']
+permissions:
+  contents: read
+
+jobs:
+  linux-cross-mini:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: linux-i686-mostly-static, host: i686-linux-gnu, apt: gcc-i686-linux-gnu, tc: linux-i686.cmake, expect: 'Intel 80386', link: CTUNNEL_LINK_MOSTLY_STATIC}
+          - {name: linux-aarch64-mostly-static, host: aarch64-linux-gnu, apt: gcc-aarch64-linux-gnu, tc: linux-aarch64.cmake, expect: 'ARM aarch64', link: CTUNNEL_LINK_MOSTLY_STATIC}
+          - {name: linux-armv7-mostly-static, host: arm-linux-gnueabihf, apt: gcc-arm-linux-gnueabihf, tc: linux-armv7.cmake, expect: 'ARM', link: CTUNNEL_LINK_MOSTLY_STATIC}
+          - {name: linux-armv7-static, host: arm-linux-gnueabihf, apt: gcc-arm-linux-gnueabihf, tc: linux-armv7.cmake, expect: 'ARM', link: CTUNNEL_LINK_STATIC}
+          - {name: linux-mips-mostly-static, host: mips-linux-gnu, apt: gcc-mips-linux-gnu, tc: linux-mips.cmake, expect: 'MIPS', link: CTUNNEL_LINK_MOSTLY_STATIC}
+          - {name: linux-mipsel-mostly-static, host: mipsel-linux-gnu, apt: gcc-mipsel-linux-gnu, tc: linux-mipsel.cmake, expect: 'MIPS', link: CTUNNEL_LINK_MOSTLY_STATIC}
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y cmake ninja-build binutils ${{ matrix.apt }}
+      - run: echo "CTUNNEL_CROSS_PREFIX=${{ matrix.host }}-" >> "$GITHUB_ENV"
+      - run: python3 scripts/kconfig/configure.py --config build/.config --build-dir build --target linux defconfig configs/mini_defconfig
+      - run: scripts/config --file build/.config --build-dir build --target linux --enable ${{ matrix.link }}
+      - run: cmake -S . -B build -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/${{ matrix.tc }} -DCMAKE_BUILD_TYPE=MinSizeRel -DCTUNNEL_KCONFIG_CONFIG=build/.config -DCTUNNEL_USE_BUNDLED_MONOCYPHER=ON -DCTUNNEL_BUILD_TESTS=OFF
+      - run: cmake --build build
+      - name: Architecture, dependency, and size checks
+        run: |
+          file build/ctunnel | tee architecture.txt
+          grep -E '${{ matrix.expect }}' architecture.txt
+          ${{ matrix.host }}-readelf -l build/ctunnel | tee program-headers.txt
+          ${{ matrix.host }}-readelf -d build/ctunnel | tee dynamic.txt
+          ! grep -Eiq 'sodium|ssl|crypto|mbedtls' dynamic.txt
+          if [ '${{ matrix.link }}' = CTUNNEL_LINK_STATIC ]; then
+            ! grep -Eq '(^|[[:space:]])INTERP([[:space:]]|$)' program-headers.txt
+            ! grep -q NEEDED dynamic.txt
+          fi
+          scripts/check-binary-config.sh build/ctunnel server-only mini
+          size_limit=400
+          if [ '${{ matrix.link }}' = CTUNNEL_LINK_STATIC ]; then size_limit=0; fi
+          CTUNNEL_STRIP=${{ matrix.host }}-strip CTUNNEL_MAX_MINI_BINARY_SIZE_KIB=$size_limit scripts/size-report.sh build/ctunnel | tee size-report.txt
+          sha256sum build/ctunnel > SHA256SUMS
+      - run: |
+          version="0.1.0-dev+$(printf %s "$GITHUB_SHA" | cut -c1-12)"
+          case "$GITHUB_REF" in refs/tags/v*) version=${GITHUB_REF_NAME#v};; esac
+          VERSION="$version" TARGET=${{ matrix.name }}-mini BINARY=build/ctunnel CONFIG=build/.config scripts/package.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ctunnel-${{ matrix.name }}-mini
+          path: |
+            ctunnel-*.tar.gz
+            build/.config
+            build/ctunnel.link-report.txt
+            size-report.txt
+            architecture.txt
+            dynamic.txt
+            program-headers.txt
+            SHA256SUMS
+
+  windows-cross-mini:
+    runs-on: windows-2022
+    strategy:
+      matrix:
+        include:
+          - {msystem: MINGW64, pkg: x86_64, name: windows-x86_64, arch: 'PE32+'}
+          - {msystem: MINGW32, pkg: i686, name: windows-i686, arch: 'PE32 executable'}
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: ${{ matrix.msystem }}
+          update: true
+          install: mingw-w64-${{ matrix.pkg }}-gcc mingw-w64-${{ matrix.pkg }}-cmake mingw-w64-${{ matrix.pkg }}-ninja zip
+      - run: python3 scripts/kconfig/configure.py --config build/.config --build-dir build --target windows defconfig configs/mini_defconfig
+      - run: scripts/config --file build/.config --build-dir build --target windows --enable CTUNNEL_LINK_STATIC
+      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=MinSizeRel -DCTUNNEL_KCONFIG_CONFIG=build/.config -DCTUNNEL_BUILD_TESTS=OFF
+      - run: cmake --build build
+      - run: file build/ctunnel.exe | tee architecture.txt && grep '${{ matrix.arch }}' architecture.txt
+      - run: objdump -p build/ctunnel.exe | tee dependencies.txt && ! grep -Eiq 'sodium|ssl|crypto|mbedtls|monocypher|libgcc_s|libwinpthread' dependencies.txt
+      - run: scripts/size-report.sh build/ctunnel.exe | tee size-report.txt
+      - run: |
+          version="0.1.0-dev+$(printf %s "$GITHUB_SHA" | cut -c1-12)"
+          case "$GITHUB_REF" in refs/tags/v*) version=${GITHUB_REF_NAME#v};; esac
+          dir="ctunnel-$version-${{ matrix.name }}-mini-static-runtime"
+          mkdir -p "$dir/examples"
+          cp build/ctunnel.exe README.md LICENSE "$dir/"
+          cp build/.config "$dir/ctunnel.config"
+          cp build/ctunnel.exe.link-report.txt "$dir/ctunnel.link-report.txt"
+          cp third_party/monocypher/LICENSE "$dir/MONOCYPHER-LICENSE"
+          cp examples/*.ini "$dir/examples/"
+          zip -r "$dir.zip" "$dir"
+          sha256sum "$dir.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ctunnel-${{ matrix.name }}-mini-static-runtime
+          path: |
+            ctunnel-*.zip
+            build/ctunnel.exe.link-report.txt
+            dependencies.txt
+            size-report.txt
+
+  native-mini:
+    strategy:
+      matrix:
+        include:
+          - {os: ubuntu-24.04, name: linux-x86_64}
+          - {os: macos-13, name: macos-x86_64}
+          - {os: macos-14, name: macos-arm64}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: target=linux; test "$(uname -s)" = Darwin && target=darwin; python3 scripts/kconfig/configure.py --config build/.config --build-dir build --target "$target" defconfig configs/mini_defconfig
+      - run: target=linux; test "$(uname -s)" = Darwin && target=darwin; scripts/config --file build/.config --build-dir build --target "$target" --enable CTUNNEL_LINK_MOSTLY_STATIC
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=MinSizeRel -DCTUNNEL_KCONFIG_CONFIG=build/.config -DCTUNNEL_BUILD_TESTS=OFF
+      - run: cmake --build build --parallel
+      - run: file build/ctunnel
+      - run: |
+          version="0.1.0-dev+$(printf %s "$GITHUB_SHA" | cut -c1-12)"
+          case "$GITHUB_REF" in refs/tags/v*) version=${GITHUB_REF_NAME#v};; esac
+          VERSION="$version" TARGET=${{ matrix.name }}-mini BINARY=build/ctunnel CONFIG=build/.config scripts/package.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ctunnel-${{ matrix.name }}-mini
+          path: |
+            ctunnel-*.tar.gz
+            build/.config
+            build/ctunnel.link-report.txt

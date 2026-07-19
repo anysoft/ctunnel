@@ -1,0 +1,88 @@
+mainmenu "ctunnel configuration"
+
+config CTUNNEL_TARGET_OS
+	string
+	option env="CTUNNEL_TARGET_OS"
+
+config TARGET_LINUX
+	bool
+	default y if CTUNNEL_TARGET_OS = "linux"
+
+config TARGET_DARWIN
+	bool
+	default y if CTUNNEL_TARGET_OS = "darwin" || CTUNNEL_TARGET_OS = "macos"
+
+config TARGET_BSD
+	bool
+	default y if CTUNNEL_TARGET_OS = "freebsd" || CTUNNEL_TARGET_OS = "openbsd" || CTUNNEL_TARGET_OS = "netbsd"
+
+config TARGET_WINDOWS
+	bool
+	default y if CTUNNEL_TARGET_OS = "windows"
+
+menu "Build profile"
+
+choice
+	prompt "Binary role"
+	default CTUNNEL_ROLE_BOTH
+
+config CTUNNEL_ROLE_BOTH
+	bool "Client and server"
+
+config CTUNNEL_ROLE_CLIENT_ONLY
+	bool "Client only"
+
+config CTUNNEL_ROLE_SERVER_ONLY
+	bool "Server only"
+
+endchoice
+
+config CTUNNEL_CLIENT
+	bool
+	default y if CTUNNEL_ROLE_BOTH || CTUNNEL_ROLE_CLIENT_ONLY
+
+config CTUNNEL_SERVER
+	bool
+	default y if CTUNNEL_ROLE_BOTH || CTUNNEL_ROLE_SERVER_ONLY
+
+config OPTIMIZE_FOR_SIZE
+	bool "Optimize executable for minimum size"
+	default n
+
+config ENABLE_LTO
+	bool "Enable link-time optimization"
+	default n
+
+config ENABLE_SECTION_GC
+	bool "Discard unused functions and data"
+	default y
+
+endmenu
+
+choice
+	prompt "Link mode"
+	default CTUNNEL_LINK_MOSTLY_STATIC
+
+config CTUNNEL_LINK_DYNAMIC
+	bool "Dynamic"
+	help
+	  Use the platform's default dynamic C runtime. Monocypher is still
+	  compiled into the ctunnel executable.
+
+config CTUNNEL_LINK_MOSTLY_STATIC
+	bool "Mostly static"
+	help
+	  Compile ctunnel and Monocypher into one executable while allowing
+	  the platform C runtime and other system runtime libraries to remain
+	  dynamic. This is the recommended embedded glibc/OpenWrt default.
+
+config CTUNNEL_LINK_STATIC
+	bool "Fully static"
+	help
+	  Request a static user-space runtime. Linux requires a target SDK
+	  containing the required static libc archives; macOS does not support
+	  this mode. Windows uses a static CRT but retains system DLLs.
+
+endchoice
+
+source "src/Kconfig"

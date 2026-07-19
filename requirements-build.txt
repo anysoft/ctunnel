@@ -1,0 +1,3 @@
+# The build uses the vendored copy so normal builds never require network access.
+kconfiglib==14.1.0
+

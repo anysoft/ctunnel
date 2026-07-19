@@ -1,0 +1,20 @@
+menu "Runtime configuration"
+
+config FEATURE_INI_CONFIG
+	bool "INI configuration files"
+	default y
+
+config FEATURE_ENV_OVERRIDE
+	bool "Environment-variable overrides"
+	default n
+
+config FEATURE_COMMAND_LINE_OVERRIDE
+	bool "Command-line overrides"
+	default y
+
+config FEATURE_UNKNOWN_CONFIG_ERROR
+	bool "Reject unknown configuration keys"
+	default y
+
+endmenu
+

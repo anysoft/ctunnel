@@ -1,0 +1,45 @@
+menu "Logging"
+
+choice
+	prompt "Maximum compiled log level"
+	default LOG_MAX_LEVEL_INFO
+
+config LOG_MAX_LEVEL_ERROR
+	bool "Error"
+
+config LOG_MAX_LEVEL_WARN
+	bool "Warn"
+
+config LOG_MAX_LEVEL_INFO
+	bool "Info"
+
+config LOG_MAX_LEVEL_DEBUG
+	bool "Debug"
+
+config LOG_MAX_LEVEL_TRACE
+	bool "Trace"
+
+endchoice
+
+config LOG_ERROR
+	bool
+	default y
+
+config LOG_WARN
+	bool
+	default y if !LOG_MAX_LEVEL_ERROR
+
+config LOG_INFO
+	bool
+	default y if LOG_MAX_LEVEL_INFO || LOG_MAX_LEVEL_DEBUG || LOG_MAX_LEVEL_TRACE
+
+config LOG_DEBUG
+	bool
+	default y if LOG_MAX_LEVEL_DEBUG || LOG_MAX_LEVEL_TRACE
+
+config LOG_TRACE
+	bool
+	default y if LOG_MAX_LEVEL_TRACE
+
+endmenu
+

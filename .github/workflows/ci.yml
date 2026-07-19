@@ -1,0 +1,165 @@
+name: CI
+on: [push, pull_request]
+permissions:
+  contents: read
+
+jobs:
+  linux-config-matrix:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: default-both-dynamic, defconfig: default_defconfig, type: Release, role: both, profile: default, tests: ON, link: CTUNNEL_LINK_DYNAMIC}
+          - {name: mini-server-mostly-static, defconfig: mini_defconfig, type: MinSizeRel, role: server-only, profile: mini, tests: OFF, link: CTUNNEL_LINK_MOSTLY_STATIC}
+          - {name: mini-client-dynamic, defconfig: mini_client_defconfig, type: MinSizeRel, role: client-only, profile: mini, tests: OFF, link: CTUNNEL_LINK_DYNAMIC}
+          - {name: full-both-dynamic, defconfig: full_defconfig, type: Debug, role: both, profile: default, tests: ON, link: CTUNNEL_LINK_DYNAMIC}
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y cmake ninja-build ripgrep binutils
+      - run: python3 scripts/kconfig/configure.py --config build/.config --build-dir build --target linux defconfig configs/${{ matrix.defconfig }}
+      - run: scripts/config --file build/.config --build-dir build --target linux --enable ${{ matrix.link }}
+      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.type }} -DCTUNNEL_KCONFIG_CONFIG=build/.config -DCTUNNEL_BUILD_TESTS=${{ matrix.tests }}
+      - run: cmake --build build
+      - if: matrix.tests == 'ON'
+        run: ctest --test-dir build --output-on-failure
+      - run: scripts/check-binary-config.sh build/ctunnel ${{ matrix.role }} ${{ matrix.profile }}
+      - run: CTUNNEL_MAX_MINI_BINARY_SIZE_KIB=400 scripts/size-report.sh build/ctunnel | tee build/size-report.txt
+      - run: sha256sum build/ctunnel > build/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64-${{ matrix.name }}
+          path: |
+            build/.config
+            build/ctunnel
+            build/ctunnel.link-report.txt
+            build/size-report.txt
+            build/SHA256SUMS
+
+  linux-link-modes:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: dynamic, compiler: gcc, packages: gcc, symbol: CTUNNEL_LINK_DYNAMIC, libc: glibc}
+          - {name: mostly-static, compiler: gcc, packages: gcc, symbol: CTUNNEL_LINK_MOSTLY_STATIC, libc: glibc}
+          - {name: musl-static, compiler: musl-gcc, packages: musl-tools, symbol: CTUNNEL_LINK_STATIC, libc: musl}
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y cmake ninja-build binutils file ${{ matrix.packages }}
+      - run: python3 scripts/kconfig/configure.py --config build/.config --build-dir build --target linux defconfig configs/default_defconfig
+      - run: scripts/config --file build/.config --build-dir build --target linux --enable ${{ matrix.symbol }}
+      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=MinSizeRel -DCMAKE_C_COMPILER=${{ matrix.compiler }} -DCTUNNEL_LIBC=${{ matrix.libc }} -DCTUNNEL_KCONFIG_CONFIG=build/.config -DCTUNNEL_BUILD_TESTS=OFF
+      - run: cmake --build build
+      - name: Verify ELF mode and record dependencies
+        run: |
+          file build/ctunnel | tee build/file.txt
+          readelf -W -l build/ctunnel | tee build/program-headers.txt
+          readelf -W -d build/ctunnel | tee build/dynamic-section.txt
+          ldd build/ctunnel > build/ldd.txt 2>&1 || true
+          cat build/ldd.txt
+          if [ '${{ matrix.symbol }}' = CTUNNEL_LINK_STATIC ]; then
+            ! grep -Eq '(^|[[:space:]])INTERP([[:space:]]|$)' build/program-headers.txt
+            ! grep -q NEEDED build/dynamic-section.txt
+            grep -Eiq 'not a dynamic executable|statically linked' build/ldd.txt
+          else
+            ! grep -Eiq 'libsodium|libssl|libcrypto|libmbedtls|libmonocypher' build/dynamic-section.txt
+          fi
+      - run: scripts/size-report.sh build/ctunnel | tee build/size-report.txt
+      - run: sha256sum build/ctunnel > build/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64-${{ matrix.name }}
+          path: |
+            build/.config
+            build/ctunnel
+            build/ctunnel.link-report.txt
+            build/file.txt
+            build/program-headers.txt
+            build/dynamic-section.txt
+            build/ldd.txt
+            build/size-report.txt
+            build/SHA256SUMS
+
+  sanitizer:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y cmake ninja-build clang libfuzzer-18-dev
+      - run: python3 scripts/kconfig/configure.py --config build/.config --build-dir build --target linux defconfig configs/full_defconfig
+      - run: cmake -S . -B build -G Ninja -DCMAKE_C_COMPILER=clang -DCTUNNEL_KCONFIG_CONFIG=build/.config -DCTUNNEL_ENABLE_ASAN=ON -DCTUNNEL_ENABLE_UBSAN=ON -DCTUNNEL_BUILD_FUZZERS=ON
+      - run: cmake --build build
+      - run: ctest --test-dir build --output-on-failure
+
+  macos-default:
+    strategy:
+      matrix:
+        include:
+          - {os: macos-13, name: macos-x86_64}
+          - {os: macos-14, name: macos-arm64}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/kconfig/configure.py --config build/.config --build-dir build --target darwin defconfig configs/default_defconfig
+      - run: scripts/config --file build/.config --build-dir build --target darwin --enable CTUNNEL_LINK_MOSTLY_STATIC
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCTUNNEL_KCONFIG_CONFIG=build/.config
+      - run: cmake --build build --parallel
+      - run: ctest --test-dir build --output-on-failure
+      - run: scripts/size-report.sh build/ctunnel | tee build/size-report.txt && shasum -a 256 build/ctunnel > build/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}-mostly-static
+          path: |
+            build/.config
+            build/ctunnel
+            build/ctunnel.link-report.txt
+            build/size-report.txt
+            build/SHA256SUMS
+
+  windows-default:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - run: python scripts/kconfig/configure.py --config build/.config --build-dir build --target windows defconfig configs/default_defconfig
+      - run: cmake -S . -B build -DCTUNNEL_KCONFIG_CONFIG=build/.config
+      - run: cmake --build build --config Release
+      - run: ctest --test-dir build -C Release --output-on-failure
+      - shell: pwsh
+        run: Get-FileHash build/Release/ctunnel.exe -Algorithm SHA256 | Format-List | Out-File build/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-default
+          path: |
+            build/.config
+            build/Release/ctunnel.exe
+            build/Release/ctunnel.exe.link-report.txt
+            build/SHA256SUMS
+
+  dependency-integrity:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y cmake ninja-build ripgrep binutils
+      - name: Verify pinned dependencies
+        run: |
+          test "$(cat third_party/monocypher/VERSION)" = 4.0.3
+          test "$(cat scripts/kconfig/VERSION | head -1)" = "Kconfiglib 14.1.0"
+          echo '57eb914fc88136119bd41655cccb8c250048bf54d470540625186f8ab16f64be  third_party/monocypher/src/monocypher.c' | sha256sum -c -
+          echo 'c494da712122da7ff679fdcf318a5317e84972b6c950fe9d896212947797facd  third_party/monocypher/include/monocypher.h' | sha256sum -c -
+          echo 'd81c16ca77a451e52e93c99d39ad9451d645506450766c9a6b7193d55c439103  scripts/kconfig/vendor/kconfiglib.py' | sha256sum -c -
+          echo 'dd5773ad8aabb348201f60ade19059586f4d550129604552b845968214861fe9  scripts/kconfig/vendor/menuconfig.py' | sha256sum -c -
+          echo '06e2c6d68a8bd4922935f414731a5f1068f473710a233d0765a7f8825840d62f  scripts/kconfig/vendor/oldconfig.py' | sha256sum -c -
+      - run: test "$(rg -l '#include [<\"]monocypher\.h[>\"]' src include | tr -d '\n')" = src/crypto/crypto_monocypher.c
+      - run: python3 tests/config/test_kconfig.py -v
+
+  static-analysis:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y clang-format clang-tidy cppcheck cmake ninja-build
+      - run: python3 scripts/kconfig/configure.py --config build/.config --build-dir build --target linux defconfig configs/default_defconfig
+      - run: clang-format --dry-run --Werror $(find src include tests -name '*.[ch]' -print)
+      - run: cppcheck --enable=warning,performance,portability --error-exitcode=1 --suppress=syntaxError:third_party/monocypher/include/monocypher.h -Ibuild/generated/include -Iinclude -Isrc -Ithird_party/monocypher/include src
+      - run: cmake -S . -B build -G Ninja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_C_COMPILER=clang -DCTUNNEL_KCONFIG_CONFIG=build/.config
+      - run: run-clang-tidy -p build 'src/(protocol|crypto|config|util)/.*\.c'

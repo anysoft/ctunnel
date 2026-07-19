@@ -1,0 +1,36 @@
+menu "Platform"
+
+choice
+	prompt "Event backend"
+	default EVENT_EPOLL if TARGET_LINUX
+	default EVENT_KQUEUE if TARGET_DARWIN || TARGET_BSD
+	default EVENT_WSAPOLL if TARGET_WINDOWS
+	default EVENT_POLL
+
+config EVENT_EPOLL
+	bool "epoll (Linux)"
+	depends on TARGET_LINUX
+
+config EVENT_KQUEUE
+	bool "kqueue (BSD/macOS)"
+	depends on TARGET_DARWIN || TARGET_BSD
+
+config EVENT_POLL
+	bool "poll (portable POSIX)"
+	depends on !TARGET_WINDOWS
+
+config EVENT_WSAPOLL
+	bool "WSAPoll (Windows)"
+	depends on TARGET_WINDOWS
+
+endchoice
+
+config FEATURE_TCP_KEEPALIVE_TUNING
+	bool "TCP keepalive tuning"
+	default y
+
+config FEATURE_SIGNAL_HANDLING
+	bool "POSIX signal handling"
+	default y
+
+endmenu

@@ -1,0 +1,9 @@
+menu "Client"
+	depends on CTUNNEL_CLIENT
+
+config FEATURE_CLIENT_RECONNECT
+	bool "Automatic reconnect"
+	default y
+
+endmenu
+

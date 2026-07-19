@@ -1,0 +1,26 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  build:
+    uses: ./.github/workflows/cross-build.yml
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ctunnel-*
+          merge-multiple: true
+      - run: sha256sum ctunnel-* > SHA256SUMS
+      - run: git archive --format=tar.gz --prefix=ctunnel-${GITHUB_REF_NAME#v}/ -o ctunnel-${GITHUB_REF_NAME#v}-source.tar.gz HEAD
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ctunnel-*
+            SHA256SUMS
+          generate_release_notes: true

@@ -1,0 +1,23 @@
+menu "Cryptography"
+
+config CRYPTO_MONOCYPHER
+	bool "Monocypher backend"
+	default y
+
+config CRYPTO_CHACHA20_POLY1305
+	bool "XChaCha20-Poly1305 control-channel AEAD"
+	depends on CRYPTO_MONOCYPHER
+	default y
+
+config FEATURE_PUBLIC_KEY_AUTH
+	bool "Ed25519 public-key authentication"
+	depends on CRYPTO_MONOCYPHER
+	default y
+
+config FEATURE_DATA_ENCRYPTION
+	bool "Encrypted relay data"
+	depends on CRYPTO_CHACHA20_POLY1305
+	default y
+
+endmenu
+

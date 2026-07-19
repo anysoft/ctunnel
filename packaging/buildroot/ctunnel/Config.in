@@ -1,0 +1,41 @@
+config BR2_PACKAGE_CTUNNEL
+	bool "ctunnel"
+	help
+	  Lightweight authenticated reverse TCP tunnel with bundled Monocypher.
+
+if BR2_PACKAGE_CTUNNEL
+
+config BR2_PACKAGE_CTUNNEL_SERVER_ONLY
+	bool "server-only binary"
+	default y
+
+config BR2_PACKAGE_CTUNNEL_IPV6_ONLY
+	bool "IPv6 only"
+	default y
+
+config BR2_PACKAGE_CTUNNEL_MINI
+	bool "minimum-size feature profile"
+	default y
+
+choice
+	prompt "ctunnel link mode"
+	default BR2_PACKAGE_CTUNNEL_LINK_MOSTLY_STATIC
+
+config BR2_PACKAGE_CTUNNEL_LINK_DYNAMIC
+	bool "dynamic"
+
+config BR2_PACKAGE_CTUNNEL_LINK_MOSTLY_STATIC
+	bool "mostly static (recommended)"
+	help
+	  Compile ctunnel and Monocypher into the executable while reusing
+	  the target libc/runtime.
+
+config BR2_PACKAGE_CTUNNEL_LINK_STATIC
+	bool "fully static"
+	help
+	  Requires all target libc/compiler runtime static archives in the
+	  selected Buildroot SDK. musl is preferred; glibc can be much larger.
+
+endchoice
+
+endif

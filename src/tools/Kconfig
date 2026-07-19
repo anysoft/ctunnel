@@ -1,0 +1,26 @@
+menu "Optional applets"
+
+config FEATURE_KEYGEN
+	bool "keygen applet"
+	depends on CRYPTO_MONOCYPHER
+	default y
+
+config FEATURE_FINGERPRINT
+	bool "fingerprint applet"
+	depends on CRYPTO_MONOCYPHER
+	default y
+
+config FEATURE_CONFIG_TEST
+	bool "configtest applet"
+	default y
+
+config FEATURE_BUILD_INFO
+	bool "build-info/build-config applets"
+	default y
+
+config FEATURE_VERBOSE_HELP
+	bool "Verbose command help"
+	default y
+
+endmenu
+

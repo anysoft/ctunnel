@@ -1,0 +1,17 @@
+[Unit]
+Description=ctunnel reverse TCP tunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ctunnel
+ExecStart=/usr/bin/ctunnel -c /etc/ctunnel/ctunnel.ini
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target

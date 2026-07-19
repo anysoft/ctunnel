@@ -1,0 +1,14 @@
+/build*/
+/dist/
+/include/generated/
+/.config
+/.config.old
+/.ctunnel-configure.mk
+/defconfig
+/.cache/
+__pycache__/
+*.pyc
+*.key
+*.pub
+*.log
+.DS_Store

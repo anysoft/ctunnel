@@ -1,0 +1,6 @@
+menu "Server"
+	depends on CTUNNEL_SERVER
+
+comment "Server control and public listeners are mandatory in phase 1"
+
+endmenu
