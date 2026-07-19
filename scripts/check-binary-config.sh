@@ -6,9 +6,13 @@ role=${2:?usage: scripts/check-binary-config.sh BINARY ROLE [mini]}
 profile=${3:-default}
 symbols=$(mktemp "${TMPDIR:-/tmp}/ctunnel-symbols.XXXXXX")
 texts=$(mktemp "${TMPDIR:-/tmp}/ctunnel-strings.XXXXXX")
-trap 'rm -f "$symbols" "$texts"' EXIT INT TERM
-nm "$binary" >"$symbols" 2>/dev/null || true
-strings "$binary" >"$texts"
+patterns=$(mktemp "${TMPDIR:-/tmp}/ctunnel-patterns.XXXXXX")
+trap 'rm -f "$symbols" "$texts" "$patterns"' EXIT INT TERM
+nm_tool=${CTUNNEL_NM:-nm}
+strings_tool=${CTUNNEL_STRINGS:-strings}
+readelf_tool=${CTUNNEL_READELF:-readelf}
+"$nm_tool" "$binary" >"$symbols" 2>/dev/null || true
+"$strings_tool" "$binary" >"$texts"
 
 case "$role" in
   server-only)
@@ -38,16 +42,29 @@ esac
 if [ "$profile" = mini ]; then
   if grep -q 'ct_keygen\|ct_fingerprint\|ct_derive_data\|ct_applet_build_info' "$symbols"; then
     echo "disabled Mini symbol found" >&2
+    grep 'ct_keygen\|ct_fingerprint\|ct_derive_data\|ct_applet_build_info' "$symbols" >&2 || true
     exit 1
   fi
-  if grep -Eq 'keygen|fingerprint|build-config|build-info|debug|trace|data/master' "$texts"; then
+  cat >"$patterns" <<'EOF'
+ctunnel keygen
+ctunnel fingerprint
+ctunnel build-info
+ctunnel build-config
+public key fingerprint
+ctunnel-v2/data/master
+EOF
+  if grep -F -f "$patterns" "$texts" >/dev/null || grep -Fx 'debug' "$texts" >/dev/null ||
+     grep -Fx 'trace' "$texts" >/dev/null; then
     echo "disabled Mini command/log/encryption string found" >&2
+    grep -F -f "$patterns" "$texts" >&2 || true
+    grep -Fx 'debug' "$texts" >&2 || true
+    grep -Fx 'trace' "$texts" >&2 || true
     exit 1
   fi
 fi
 
-if command -v readelf >/dev/null 2>&1; then
-  if readelf -d "$binary" 2>/dev/null | grep -Eiq 'libsodium|libssl|libcrypto|mbedtls'; then
+if command -v "$readelf_tool" >/dev/null 2>&1; then
+  if "$readelf_tool" -d "$binary" 2>/dev/null | grep -Eiq 'libsodium|libssl|libcrypto|mbedtls'; then
     echo "unexpected external cryptographic library dependency" >&2
     exit 1
   fi

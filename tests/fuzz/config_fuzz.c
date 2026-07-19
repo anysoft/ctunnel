@@ -1,8 +1,10 @@
+#define _POSIX_C_SOURCE 200809L
 #include "ctunnel.h"
 #include <fcntl.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {

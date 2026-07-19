@@ -116,7 +116,7 @@ jobs:
           ${{ matrix.host }}-readelf -W -l build/ctunnel | tee build/program-headers.txt
           ${{ matrix.host }}-readelf -W -d build/ctunnel | tee build/dynamic.txt
           ! grep -Eiq 'sodium|ssl|crypto|mbedtls|monocypher' build/dynamic.txt
-          scripts/check-binary-config.sh build/ctunnel server-only mini
+          CTUNNEL_NM=${{ matrix.host }}-nm CTUNNEL_STRINGS=${{ matrix.host }}-strings CTUNNEL_READELF=${{ matrix.host }}-readelf scripts/check-binary-config.sh build/ctunnel server-only mini
           CTUNNEL_FILE=file CTUNNEL_STRIP=${{ matrix.host }}-strip CTUNNEL_SIZE=${{ matrix.host }}-size CTUNNEL_NM=${{ matrix.host }}-nm CTUNNEL_READELF=${{ matrix.host }}-readelf CTUNNEL_OBJDUMP=${{ matrix.host }}-objdump CTUNNEL_MAX_MINI_BINARY_SIZE_KIB=400 scripts/size-report.sh build/ctunnel | tee build/size-report.txt
           version="0.1.0-dev+$(printf %s "$GITHUB_SHA" | cut -c1-12)"
           case "$GITHUB_REF" in refs/tags/v*) version=${GITHUB_REF_NAME#v};; esac
