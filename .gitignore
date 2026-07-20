@@ -1,5 +1,8 @@
 /build*/
 /dist/
+# Local packages created by scripts/package.sh and build-local.sh
+/ctunnel-*.tar.gz
+/ctunnel-*.zip
 /include/generated/
 /.config
 /.config.old
