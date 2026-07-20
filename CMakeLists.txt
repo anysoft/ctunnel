@@ -330,10 +330,22 @@ if(MSVC)
     target_compile_options(ctunnel PRIVATE /O1)
   endif()
 else()
-  set(CTUNNEL_PROJECT_WARNINGS
+  include(CheckCCompilerFlag)
+  set(CTUNNEL_PROJECT_WARNING_CANDIDATES
       -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Wformat=2
       -Wformat-security -Wnull-dereference -Wdouble-promotion -Wstrict-prototypes
       -Wmissing-prototypes -Wcast-align -Wundef -Wwrite-strings)
+  set(CTUNNEL_PROJECT_WARNINGS)
+  foreach(CTUNNEL_WARNING IN LISTS CTUNNEL_PROJECT_WARNING_CANDIDATES)
+    string(MAKE_C_IDENTIFIER "${CTUNNEL_WARNING}" CTUNNEL_WARNING_ID)
+    set(CTUNNEL_WARNING_CHECK "CTUNNEL_COMPILER_HAS${CTUNNEL_WARNING_ID}")
+    check_c_compiler_flag("${CTUNNEL_WARNING}" "${CTUNNEL_WARNING_CHECK}")
+    if(${CTUNNEL_WARNING_CHECK})
+      list(APPEND CTUNNEL_PROJECT_WARNINGS "${CTUNNEL_WARNING}")
+    else()
+      message(STATUS "Compiler does not support ${CTUNNEL_WARNING}; omitting it")
+    endif()
+  endforeach()
   target_compile_options(ctunnel PRIVATE ${CTUNNEL_PROJECT_WARNINGS} -fvisibility=hidden)
   if(CTUNNEL_WARNINGS_AS_ERRORS)
     target_compile_options(ctunnel PRIVATE -Werror)
