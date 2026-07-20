@@ -4,7 +4,9 @@
 #include <string.h>
 #include <time.h>
 #ifndef _WIN32
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #endif
 #ifdef CONFIG_LOG_TRACE
 #define CT_COMPILED_LOG_MAX CT_LOG_LEVEL_TRACE
@@ -20,22 +22,52 @@
 static int g_level = CT_COMPILED_LOG_MAX;
 static char g_log_path[CONFIG_MAX_PATH_LENGTH];
 static int g_rotate_days = 7;
+static size_t g_log_max_bytes = 1024U * 1024U;
 static int g_log_day = -1;
 
 void ct_log_set_level(int l) {
     g_level = l <= CT_COMPILED_LOG_MAX ? l : CT_COMPILED_LOG_MAX;
 }
 
-int ct_log_configure(const char *path, int rotate_days) {
+static FILE *open_log_append(const char *path) {
+#ifdef _WIN32
+    return fopen(path, "ab");
+#else
+    int flags = O_WRONLY | O_CREAT | O_APPEND;
+#ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
+#endif
+#ifdef O_NOFOLLOW
+    flags |= O_NOFOLLOW;
+#endif
+    int fd = open(path, flags, 0600);
+    struct stat status;
+    if (fd < 0)
+        return NULL;
+    if (fstat(fd, &status) != 0 || !S_ISREG(status.st_mode)) {
+        close(fd);
+        return NULL;
+    }
+    FILE *file = fdopen(fd, "ab");
+    if (!file)
+        close(fd);
+    return file;
+#endif
+}
+
+int ct_log_configure(const char *path, int rotate_days, int max_size_kib) {
     g_log_path[0] = 0;
     g_log_day = -1;
     g_rotate_days = rotate_days < 0 ? 7 : rotate_days;
+    if (max_size_kib < 64 || (size_t)max_size_kib > SIZE_MAX / 1024U)
+        return -1;
+    g_log_max_bytes = (size_t)max_size_kib * 1024U;
     if (!path || !*path || !strcmp(path, "-") || !strcmp(path, "stderr"))
         return 0;
     if (strlen(path) >= sizeof g_log_path)
         return -1;
     memcpy(g_log_path, path, strlen(path) + 1);
-    FILE *file = fopen(g_log_path, "ab");
+    FILE *file = open_log_append(g_log_path);
     if (!file) {
         g_log_path[0] = 0;
         return -1;
@@ -138,9 +170,45 @@ static void rotate_if_needed(int today) {
 static void write_one(FILE *stream, const char *stamp, const char *level_name, const char *module,
                       const char *fmt, va_list ap) {
     fprintf(stream, "%s %-5s [%s] ", stamp, level_name, module);
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
+#elif defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-nonliteral"
+#endif
     vfprintf(stream, fmt, ap);
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#elif defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
     fputc('\n', stream);
     fflush(stream);
+}
+
+static size_t line_size(const char *stamp, const char *level_name, const char *module,
+                        const char *fmt, va_list ap) {
+    int prefix = snprintf(NULL, 0, "%s %-5s [%s] ", stamp, level_name, module);
+    va_list measure;
+    va_copy(measure, ap);
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
+#elif defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-nonliteral"
+#endif
+    int body = vsnprintf(NULL, 0, fmt, measure);
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#elif defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+    va_end(measure);
+    if (prefix < 0 || body < 0 || (size_t)prefix > SIZE_MAX - (size_t)body - 1U)
+        return SIZE_MAX;
+    return (size_t)prefix + (size_t)body + 1U;
 }
 
 static void logv(const char *level_name, const char *module, const char *fmt, va_list ap) {
@@ -159,9 +227,15 @@ static void logv(const char *level_name, const char *module, const char *fmt, va
     va_end(copy);
     if (g_log_path[0]) {
         rotate_if_needed(day_number(&tmv));
-        FILE *file = fopen(g_log_path, "ab");
+        FILE *file = open_log_append(g_log_path);
         if (file) {
-            write_one(file, stamp, level_name, module, fmt, ap);
+            if (fseek(file, 0, SEEK_END) == 0) {
+                long size = ftell(file);
+                size_t needed = line_size(stamp, level_name, module, fmt, ap);
+                if (size >= 0 && (size_t)size <= g_log_max_bytes &&
+                    needed <= g_log_max_bytes - (size_t)size)
+                    write_one(file, stamp, level_name, module, fmt, ap);
+            }
             fclose(file);
         }
     }

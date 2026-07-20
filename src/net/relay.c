@@ -18,7 +18,8 @@ static int append(ct_ring *r, const void *p, size_t n) {
     return ct_ring_write(r, p, n) == n ? 0 : -1;
 }
 int ct_relay_init(ct_relay *r, ct_socket direct, ct_socket work, int client, ct_enc_mode mode,
-                  ct_cipher cipher, const uint8_t master[32], uint64_t sid, const uint8_t rnd[32]) {
+                  ct_cipher cipher, const uint8_t master[32], uint64_t sid, const uint8_t rnd[32],
+                  const uint8_t work_id[32], const char *service_id) {
     memset(r, 0, sizeof *r);
     r->direct = direct;
     r->work = work;
@@ -33,8 +34,13 @@ int ct_relay_init(ct_relay *r, ct_socket direct, ct_socket work, int client, ct_
     }
     if (r->encrypted) {
         int senddir = client ? 0 : 1, recvdir = client ? 1 : 0;
-        ct_derive_data(master, sid, rnd, senddir, r->send_key, r->send_nonce);
-        ct_derive_data(master, sid, rnd, recvdir, r->recv_key, r->recv_nonce);
+        if (ct_derive_data(master, sid, rnd, work_id, service_id, mode, senddir, r->send_key,
+                           r->send_nonce) ||
+            ct_derive_data(master, sid, rnd, work_id, service_id, mode, recvdir, r->recv_key,
+                           r->recv_nonce)) {
+            ct_relay_close(r);
+            return -1;
+        }
     }
 #else
     (void)client;
@@ -42,6 +48,8 @@ int ct_relay_init(ct_relay *r, ct_socket direct, ct_socket work, int client, ct_
     (void)master;
     (void)sid;
     (void)rnd;
+    (void)work_id;
+    (void)service_id;
     if (mode != CT_ENC_DISABLED || ct_ring_init(&r->to_direct, CT_IO_BUFFER_SIZE) ||
         ct_ring_init(&r->to_work, CT_IO_BUFFER_SIZE)) {
         ct_relay_close(r);
@@ -120,10 +128,9 @@ static int decrypt_ready(ct_relay *r) {
         uint8_t h[12], box[CHUNK + CT_AEAD_TAG], plain[CHUNK];
         ct_ring rr = r->work_input;
         ct_ring_read(&rr, h, 12);
-        uint32_t n = ct_get_u32(h);
-        uint64_t seq = ct_get_u64(h + 4);
-        if (n < CT_AEAD_TAG || n > CHUNK + CT_AEAD_TAG || r->recv_seq == UINT64_MAX ||
-            seq != r->recv_seq + 1)
+        uint32_t n;
+        uint64_t seq;
+        if (ct_data_record_header_decode(h, CHUNK, r->recv_seq, &n, &seq))
             return -1;
         if (r->work_input.len < 12 + n)
             return 0;

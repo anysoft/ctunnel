@@ -80,13 +80,16 @@ int ct_x_keypair(uint8_t[32], uint8_t[32]);
 int ct_x_shared(uint8_t[32], const uint8_t[32], const uint8_t[32]);
 int ct_derive_session(const uint8_t[32], const uint8_t *, size_t, ct_session_keys *);
 #ifdef CONFIG_FEATURE_DATA_ENCRYPTION
-int ct_derive_data(const uint8_t[32], uint64_t, const uint8_t[32], int, uint8_t[32],
-                   uint8_t[CT_NONCE_BASE]);
+int ct_derive_data(const uint8_t[32], uint64_t, const uint8_t[32], const uint8_t[32], const char *,
+                   ct_enc_mode, int, uint8_t[32], uint8_t[CT_NONCE_BASE]);
 #endif
 int ct_aead_encrypt(ct_cipher, const uint8_t[32], const uint8_t[CT_NONCE_BASE], uint64_t,
                     const uint8_t *, size_t, const uint8_t *, size_t, uint8_t *, size_t *);
 int ct_aead_decrypt(ct_cipher, const uint8_t[32], const uint8_t[CT_NONCE_BASE], uint64_t,
                     const uint8_t *, size_t, const uint8_t *, size_t, uint8_t *, size_t *);
 int ct_cipher_available(ct_cipher);
+#ifdef CONFIG_FEATURE_TEST_HOOKS
+void ct_test_nonce_tracker_reset(void);
+#endif
 
 #endif

@@ -10,7 +10,7 @@ enum {
     CT_LOG_LEVEL_TRACE
 };
 void ct_log_set_level(int level);
-int ct_log_configure(const char *path, int rotate_days);
+int ct_log_configure(const char *path, int rotate_days, int max_size_kib);
 int ct_log_parse_level(const char *s);
 const char *ct_log_level_name(int level);
 void ct_log_write(int level, const char *module, const char *fmt, ...);

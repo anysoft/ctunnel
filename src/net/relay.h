@@ -17,7 +17,7 @@ typedef struct {
     ct_ring to_direct, to_work;
 } ct_relay;
 int ct_relay_init(ct_relay *, ct_socket, ct_socket, int, ct_enc_mode, ct_cipher, const uint8_t[32],
-                  uint64_t, const uint8_t[32]);
+                  uint64_t, const uint8_t[32], const uint8_t[32], const char *);
 void ct_relay_close(ct_relay *);
 int ct_relay_events(const ct_relay *, ct_socket);
 int ct_relay_process(ct_relay *, ct_socket, int);

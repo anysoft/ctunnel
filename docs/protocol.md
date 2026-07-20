@@ -1,39 +1,79 @@
-# 线协议 v2
+# 线协议 v3
 
-所有线协议整数均为无符号网络字节序。各字段逐一编码，绝不传输 C 结构体布局。版本 2 与先前第一期草案有意不兼容，因为签名算法、KDF、nonce 长度、套件名称和握手转录上下文均已变更。
+所有整数使用网络字节序，字段逐一编码，不传输 C 结构体布局。v3 因加强 work、stream 和 DATA 上下文绑定而与 v2 有意不兼容；实现看到非 v3 帧即拒绝，不提供自动降级。
 
-## 帧头
+## 帧
 
 | 偏移 | 长度 | 字段 |
 |---:|---:|---|
 | 0 | 4 | magic `CTUN`（`0x4354554e`） |
-| 4 | 1 | 协议版本（`2`） |
+| 4 | 1 | 协议版本 `3` |
 | 5 | 1 | 消息类型 |
-| 6 | 1 | 标志（`1` = 已加密） |
-| 7 | 1 | 帧头长度（`36`） |
+| 6 | 1 | flags（`1` 表示控制 payload 已加密） |
+| 7 | 1 | header 长度 `36` |
 | 8 | 4 | payload 长度 |
-| 12 | 8 | 会话 ID |
-| 20 | 8 | 流 ID |
-| 28 | 8 | 序号 |
+| 12 | 8 | session ID |
+| 20 | 8 | stream ID |
+| 28 | 8 | sequence |
 
-payload、客户端/服务 ID、地址和缓冲区上限均为编译期 Kconfig 硬限制（Default 档位使用 1 MiB、64 字节 ID 和 128 字节地址）。字符串在线协议中仍使用 16 位长度。解码器会拒绝错误的 magic、版本和帧头长度，未知消息，超过本地编译上限的值，畸形字段，错误的加密标志或会话，以及不连续的加密序号。因此，互通双方必须使用兼容的协议限制。
+plain 握手消息未使用的 session、stream、sequence 必须为零；work bind 要求 stream、sequence 为零；START/READY 的 stream ID 必须与认证 payload 中的值一致。长度在分配或读取前验证，未知版本、类型、flags、非规范字段和越界长度均失败关闭。
 
-## 握手与密钥派生
+## 握手、转录与会话密钥
 
-`CLIENT_HELLO` 携带 `client_id`、random[32]、临时 X25519 公钥[32] 和密码套件掩码。`SERVER_HELLO` 携带 random[32]、临时 X25519 公钥[32]、所选密码套件和 signature[64]。`CLIENT_AUTH` 携带 signature[64]。只支持套件 ID 1（`xchacha20-poly1305`）；不支持的提议或选择会被拒绝。
+`CLIENT_HELLO` 为 `client_id:u16+bytes || client_random[32] || client_ephemeral_x25519[32] || offered_ciphers:u32`。`SERVER_HELLO` 为 `server_random[32] || server_ephemeral_x25519[32] || selected_cipher:u8 || signature[64]`，`CLIENT_AUTH` 为 `signature[64]`。当前仅套件 1 `xchacha20-poly1305` 可用。
 
-握手转录是以下字节串的连接：`"ctunnel-handshake-v2" || CLIENT_HELLO_payload || server_random || server_ephemeral_public || selected_cipher`。服务端签名 `"ctunnel server handshake v2" || BLAKE2b-256(transcript)`，客户端签名对应的 `"ctunnel client handshake v2"` 值。签名使用 Monocypher EdDSA-BLAKE2b。`AUTH_OK` 是第一个加密帧。
+规范转录为：
 
-KDF 提取阶段使用 keyed BLAKE2b-512，其中 `key=transcript_hash`、`message=X25519_shared_secret`。扩展阶段把 `little_endian_u64(counter) || context` 输入 keyed BLAKE2b-512，连接各输出块后截断到所需长度。带版本的标签分别派生不同角色/通道的密钥和 nonce 基值，以及工作连接/流认证密钥和会话 ID。
+```text
+"ctunnel-handshake-v3" || magic:u32 || protocol_version:u8 ||
+CLIENT_HELLO_payload || server_random || server_ephemeral_public ||
+selected_cipher || BLAKE2b-256(client_identity_public) ||
+BLAKE2b-256(server_identity_public)
+```
 
-加密 payload 长度包含 16 字节 XChaCha20-Poly1305 tag。完整 36 字节帧头作为关联数据。nonce 为 `base[16] || sequence_u64_be`。发送方在使用前递增序号；接收方只接受严格等于 `previous + 1` 的序号；序号耗尽会终止会话。
+其中 magic 是 `CTUN`，protocol version 是 3。服务端和客户端分别签名 `"ctunnel server handshake v3" || BLAKE2b-256(transcript)` 与 `"ctunnel client handshake v3" || BLAKE2b-256(transcript)`。签名算法是 Monocypher EdDSA-BLAKE2b。身份公钥 fingerprint 与验证签名实际使用的固定/授权公钥一致。双方用新鲜临时 X25519 密钥导出 shared secret，拒绝全零结果；`AUTH_OK` 是首个加密控制帧。
 
-## 服务注册与工作流
+会话 KDF 令 `salt=BLAKE2b-256(transcript)`，`PRK=BLAKE2b-512(key=salt, message=X25519_shared)`，再连接 `BLAKE2b-512(key=PRK, message=LE64(counter)||context)`（counter 从 0 开始）并截取所需长度。任何派生失败都会终止握手，不使用部分或零输出。
 
-`REGISTER_SERVICE` 携带服务 ID、监听地址、端口、服务类型（`1=TCP`，`2=HTTP` 和 `3=HTTPS` 保留）以及 DATA 模式（`0=required`、`1=disabled`）。第一期会拒绝保留的服务类型。
+固定 context 列表如下，不使用前缀匹配：
 
-`WORK_CONNECTION_BIND` 携带工作 ID[32]（`monotonic_u64_be || random[24]`）和 keyed BLAKE2b-256 authenticator[32]，会话 ID 位于帧头中。64 序号滑动窗口允许不同套接字上的有限乱序到达，但会拒绝重复值、零和过旧值。启动/就绪消息携带服务、流、模式、连接随机数以及使用独立密钥生成的认证值。
+```text
+ctunnel-v3/control-c2s-key
+ctunnel-v3/control-s2c-key
+ctunnel-v3/control-c2s-nonce
+ctunnel-v3/control-s2c-nonce
+ctunnel-v3/data-master
+ctunnel-v3/work-auth
+ctunnel-v3/stream-auth
+ctunnel-v3/session-id
+ctunnel-v3/data-stream-c2s-key
+ctunnel-v3/data-stream-s2c-key
+ctunnel-v3/data-stream-c2s-nonce
+ctunnel-v3/data-stream-s2c-nonce
+```
 
-就绪后，`disabled` 模式流直接转发原始 TCP；`required` 模式流使用 `ciphertext_length:u32 || sequence:u64 || ciphertext || tag[16]`，其中 12 字节记录头作为关联数据。明文记录最大为 16 KiB，并使用每流、每方向的密钥和 nonce 基值。
+work 与 stream keyed BLAKE2b-256 输入另用完整标签 `ctunnel-v3/work-bind/client-to-server` 和 `ctunnel-v3/stream-binding`。DATA 派生先用 `BLAKE2b-256` 哈希 `ctunnel-v3/data-stream || stream || random || work || service-length/service || mode || direction` 作为 salt，再使用上列方向标签。独立 Python/C 向量见 `tests/vectors/`。
 
-未知协议版本会被拒绝。未来任何对帧格式、握手转录覆盖范围、签名构造、密钥派生或 nonce 构造的修改都必须使用新的协议版本。
+控制 payload 使用 XChaCha20-Poly1305，完整 36 字节 header 是 AAD。nonce 为 `base[16] || sequence_u64_be`。发送序号从 1 开始且在加密前递增；接收端只接受精确的前值加一；回绕、重复、乱序或 tag 失败均终止会话。
+
+## 服务、work 与 stream 绑定
+
+`REGISTER_SERVICE` 在已认证控制通道内携带 service ID、监听地址、端口、TCP 类型和 DATA 模式。服务端先执行身份 ACL、资源上限和全局监听端点冲突检查，再绑定公开 listener。
+
+`WORK_CONNECTION_BIND` payload 为 `work_id[32] || mac[32]`。work ID 是 `monotonic_u64 || random[24]`。MAC 输入为版本/方向标签、session ID、client ID、消息类型和完整 work ID；服务端保存该 ID，并用 64 位滑动窗口拒绝零、重复和过旧序号。
+
+`START_STREAM` 与 `STREAM_READY/STREAM_FAILED` 都携带并认证：session、client ID、work ID、service ID、stream ID、DATA mode、stream random、消息类型、发送角色和结果位。接收端还验证 header 的 session/type/stream/sequence。认证值只能在对应会话、work socket、服务、模式、方向和消息阶段使用。
+
+## DATA 记录
+
+`data_encryption=false` 时，stream 建立仍被认证，但后续应用字节原样传输，不提供业务数据机密性或完整性。
+
+`data_encryption=true` 时，每个方向独立派生 key 和 nonce base；派生上下文包含 stream ID、stream random、work ID、service ID、DATA mode 和方向。记录格式为：
+
+```text
+ciphertext_length:u32 || sequence:u64 || ciphertext || tag[16]
+```
+
+12 字节记录头是 AAD，明文记录最大 16 KiB，sequence 从 1 开始并严格递增。header、tag、顺序或长度不合法会关闭该 relay。加密不隐藏端点、记录长度、方向、时序和连接数量，也不提供抗阻断能力。
+
+任何修改 header、握手转录、签名上下文、KDF、nonce、AAD 或 work/stream 认证覆盖范围的变更，都必须再次提升协议版本并默认拒绝旧版本。

@@ -109,3 +109,31 @@ int ct_unpack_string(const uint8_t *b, size_t n, size_t *off, char *out, size_t 
     *off += 2 + z;
     return 0;
 }
+int ct_data_record_header_decode(const uint8_t header[12], size_t max_plaintext,
+                                 uint64_t previous_sequence, uint32_t *encoded_length,
+                                 uint64_t *sequence) {
+    uint32_t length = ct_get_u32(header);
+    uint64_t received_sequence = ct_get_u64(header + 4);
+    if (max_plaintext > UINT32_MAX - CT_RECORD_TAG_SIZE || length < CT_RECORD_TAG_SIZE ||
+        length > max_plaintext + CT_RECORD_TAG_SIZE || previous_sequence == UINT64_MAX ||
+        received_sequence != previous_sequence + 1)
+        return -1;
+    *encoded_length = length;
+    *sequence = received_sequence;
+    return 0;
+}
+
+int ct_register_request_decode(const uint8_t *payload, size_t length, char *service_id,
+                               size_t service_capacity, char *remote_address,
+                               size_t address_capacity, uint16_t *remote_port, uint8_t *type,
+                               uint8_t *mode) {
+    size_t offset = 0;
+    if (ct_unpack_string(payload, length, &offset, service_id, service_capacity) ||
+        ct_unpack_string(payload, length, &offset, remote_address, address_capacity) ||
+        length - offset != 4)
+        return -1;
+    *remote_port = ct_get_u16(payload + offset);
+    *type = payload[offset + 2];
+    *mode = payload[offset + 3];
+    return 0;
+}

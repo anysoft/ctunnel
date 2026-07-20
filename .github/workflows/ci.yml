@@ -102,6 +102,13 @@ jobs:
       - run: cmake -S . -B build -G Ninja -DCMAKE_C_COMPILER=clang -DCTUNNEL_KCONFIG_CONFIG=build/.config -DCTUNNEL_ENABLE_ASAN=ON -DCTUNNEL_ENABLE_UBSAN=ON -DCTUNNEL_BUILD_FUZZERS=ON
       - run: cmake --build build --verbose
       - run: ctest --test-dir build --output-on-failure
+      - name: Fuzz smoke tests
+        run: |
+          mkdir -p build/fuzz-corpus
+          for target in frame_fuzz handshake_fuzz data_record_fuzz service_registration_fuzz config_fuzz key_file_fuzz; do
+            mkdir -p "build/fuzz-corpus/$target"
+            "build/$target" -runs=20000 "build/fuzz-corpus/$target"
+          done
 
   macos-default:
     strategy:
@@ -180,5 +187,5 @@ jobs:
       - run: python3 scripts/kconfig/configure.py --config build/.config --build-dir build --target linux defconfig configs/default_defconfig
       - run: clang-format --dry-run --Werror $(find src include tests -name '*.[ch]' -print)
       - run: cppcheck --enable=warning,performance,portability --error-exitcode=1 --suppress=syntaxError:third_party/monocypher/include/monocypher.h -Ibuild/generated/include -Iinclude -Isrc -Ithird_party/monocypher/include src
-      - run: cmake -S . -B build -G Ninja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_C_COMPILER=clang -DCTUNNEL_KCONFIG_CONFIG=build/.config
+      - run: cmake -S . -B build -G Ninja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_C_COMPILER=clang -DCTUNNEL_KCONFIG_CONFIG=build/.config -DCTUNNEL_WARNINGS_AS_ERRORS=ON
       - run: run-clang-tidy-18 -p build 'src/(protocol|crypto|config|util)/.*\.c' || run-clang-tidy -p build 'src/(protocol|crypto|config|util)/.*\.c'

@@ -56,7 +56,7 @@ typedef struct {
     int reconnect_initial_delay, reconnect_max_delay, reconnect_jitter_percent, pool_count;
     int max_clients, max_services_per_client, max_streams_per_client, max_pending_streams;
     ct_enc_mode default_data_encryption;
-    int log_level, log_rotate_days;
+    int log_level, log_rotate_days, log_max_size_kib;
     ct_service_config services[CT_MAX_SERVICES];
     size_t service_count;
     ct_authorized_client clients[CT_MAX_AUTH_CLIENTS];
@@ -66,6 +66,7 @@ typedef struct {
 int ct_config_load(const char *path, ct_config *out, char *err, size_t errlen);
 int ct_authorized_load(const char *path, ct_config *cfg, char *err, size_t errlen);
 int ct_config_validate(const ct_config *cfg, char *err, size_t errlen);
+int ct_config_validate_security_files(const ct_config *cfg, char *err, size_t errlen);
 const ct_authorized_client *ct_authorized_find(const ct_config *, const char *id);
 bool ct_authorized_port(const ct_authorized_client *, const char *addr, uint16_t port);
 

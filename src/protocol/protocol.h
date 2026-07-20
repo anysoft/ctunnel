@@ -4,8 +4,9 @@
 #include <stddef.h>
 #include <stdint.h>
 #define CT_MAGIC 0x4354554eU
-#define CT_PROTOCOL_VERSION 2
+#define CT_PROTOCOL_VERSION 3
 #define CT_FLAG_ENCRYPTED 1
+#define CT_RECORD_TAG_SIZE 16U
 typedef enum {
     CT_MSG_CLIENT_HELLO = 1,
     CT_MSG_SERVER_HELLO,
@@ -43,4 +44,7 @@ uint32_t ct_get_u32(const uint8_t *);
 uint64_t ct_get_u64(const uint8_t *);
 int ct_pack_string(uint8_t *, size_t, size_t *, const char *, size_t);
 int ct_unpack_string(const uint8_t *, size_t, size_t *, char *, size_t);
+int ct_data_record_header_decode(const uint8_t[12], size_t, uint64_t, uint32_t *, uint64_t *);
+int ct_register_request_decode(const uint8_t *, size_t, char *, size_t, char *, size_t, uint16_t *,
+                               uint8_t *, uint8_t *);
 #endif

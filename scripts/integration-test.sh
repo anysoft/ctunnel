@@ -8,14 +8,19 @@ server_port=$port_base
 remote_encrypted_port=$((port_base + 1))
 local_echo_port=$((port_base + 2))
 remote_raw_port=$((port_base + 3))
+proxy_port=$((port_base + 4))
 server_pid=
 client_pid=
 echo_pid=
+proxy_pid=
+slow_pid=
 # shellcheck disable=SC2329
 cleanup() {
   [ -z "$client_pid" ] || kill "$client_pid" 2>/dev/null || true
   [ -z "$server_pid" ] || kill "$server_pid" 2>/dev/null || true
   [ -z "$echo_pid" ] || kill "$echo_pid" 2>/dev/null || true
+  [ -z "$proxy_pid" ] || kill "$proxy_pid" 2>/dev/null || true
+  [ -z "$slow_pid" ] || kill "$slow_pid" 2>/dev/null || true
   rm -rf "$root"
 }
 trap cleanup EXIT INT TERM
@@ -66,7 +71,7 @@ cat >"$root/client.ini" <<EOF
 [common]
 mode = client
 server_addr = ::1
-server_port = $server_port
+server_port = $proxy_port
 client_id = integration
 identity_private_key = $root/client.key
 server_public_key = $root/server.pub
@@ -98,6 +103,36 @@ EOF
 "$bin" -t -c "$root/server.ini" >/dev/null
 "$bin" -t -c "$root/client.ini" >/dev/null
 "$bin" -c "$root/server.ini" >"$root/server.log" 2>&1 & server_pid=$!
+CTUNNEL_PROXY_PORT=$proxy_port CTUNNEL_SERVER_PORT=$server_port CTUNNEL_CAPTURE=$root/tunnel.capture \
+python3 -c 'import os,socket,threading
+listen_port=int(os.environ["CTUNNEL_PROXY_PORT"]);server_port=int(os.environ["CTUNNEL_SERVER_PORT"]);capture=os.environ["CTUNNEL_CAPTURE"]
+lock=threading.Lock()
+def pump(source,destination):
+ try:
+  while True:
+   data=source.recv(65536)
+   if not data: break
+   with lock:
+    with open(capture,"ab") as output: output.write(data)
+   destination.sendall(data)
+ finally:
+  try: destination.shutdown(socket.SHUT_WR)
+  except OSError: pass
+def handle(client):
+ try:
+  upstream=socket.create_connection(("::1",server_port),2)
+  upstream.settimeout(None)
+ except OSError:
+  client.close();return
+ threading.Thread(target=pump,args=(client,upstream),daemon=True).start()
+ threading.Thread(target=pump,args=(upstream,client),daemon=True).start()
+listener=socket.socket(socket.AF_INET6);listener.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);listener.bind(("::1",listen_port));listener.listen()
+while True: handle(listener.accept()[0])' & proxy_pid=$!
+sleep .1
+CTUNNEL_PROXY_PORT=$proxy_port python3 -c 'import os,socket,time
+s=socket.create_connection(("::1",int(os.environ["CTUNNEL_PROXY_PORT"])),1)
+s.sendall(b"C")
+time.sleep(30)' & slow_pid=$!
 CTUNNEL_ECHO_PORT=$local_echo_port python3 -c 'import os,socket
 s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);s.bind(("127.0.0.1",int(os.environ["CTUNNEL_ECHO_PORT"])));s.listen()
 while True:
@@ -136,6 +171,19 @@ def once(i):
    out+=chunk
   assert out==msg
 with concurrent.futures.ThreadPoolExecutor(max_workers=6) as x: list(x.map(once,range(6)))' 2>/dev/null; then
+    CTUNNEL_REMOTE_ENCRYPTED_PORT=$remote_encrypted_port CTUNNEL_REMOTE_RAW_PORT=$remote_raw_port CTUNNEL_CAPTURE=$root/tunnel.capture python3 -c 'import os,socket,time
+encrypted=b"CTUNNEL_SECRET_TEST_PATTERN_ENCRYPTED_7f6d"
+raw=b"CTUNNEL_RAW_TEST_PATTERN_VISIBLE_2a91"
+for port,message in ((int(os.environ["CTUNNEL_REMOTE_ENCRYPTED_PORT"]),encrypted),(int(os.environ["CTUNNEL_REMOTE_RAW_PORT"]),raw)):
+ with socket.create_connection(("::1",port),1) as connection:
+  connection.sendall(message)
+  received=connection.recv(len(message))
+  assert received==message
+time.sleep(.1)
+captured=open(os.environ["CTUNNEL_CAPTURE"],"rb").read()
+assert encrypted not in captured
+assert raw in captured
+'
     CTUNNEL_REMOTE_ENCRYPTED_PORT=$remote_encrypted_port python3 -c 'import os,socket,signal
 signal.alarm(8)
 p=int(os.environ["CTUNNEL_REMOTE_ENCRYPTED_PORT"])

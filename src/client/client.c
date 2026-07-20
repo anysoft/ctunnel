@@ -26,7 +26,8 @@ typedef struct {
 } ref;
 
 typedef struct {
-    ct_socket fd;
+    ct_work connection;
+    uint64_t read_retry_after_ms;
 } idle_work;
 static const ct_service_config *client_svc(const ct_config *c, const char *id) {
     for (size_t i = 0; i < c->service_count; i++)
@@ -37,11 +38,22 @@ static const ct_service_config *client_svc(const ct_config *c, const char *id) {
 static int add_work(const ct_config *cfg, ct_control *c, idle_work *w, size_t *n) {
     if (*n >= MAX_WORK)
         return -1;
-    ct_socket f;
-    if (ct_work_connect(cfg, c, &f))
+    ct_work connection;
+    if (ct_work_connect(cfg, c, &connection))
         return -1;
-    w[(*n)++].fd = f;
+    w[*n].connection = connection;
+    w[*n].read_retry_after_ms = 0;
+    (*n)++;
     return 0;
+}
+static idle_work *find_work(idle_work *work, size_t work_count, ct_socket fd, size_t *index) {
+    for (size_t i = 0; i < work_count; i++)
+        if (work[i].connection.fd == fd) {
+            if (index)
+                *index = i;
+            return &work[i];
+        }
+    return NULL;
 }
 static int client_register(const ct_config *cfg, ct_control *c) {
     for (size_t i = 0; i < cfg->service_count; i++) {
@@ -56,9 +68,27 @@ static int client_register(const ct_config *cfg, ct_control *c) {
         o += 2;
         b[o++] = (uint8_t)s->type;
         b[o++] = (uint8_t)s->encryption;
-        if (ct_control_send(c, CT_MSG_REGISTER_SERVICE, 0, b, o, 5000) ||
-            ct_control_recv(c, &h, reply, sizeof reply, &n, 5000) || h.type != CT_MSG_REGISTER_OK)
+        if (ct_control_send(c, CT_MSG_REGISTER_SERVICE, 0, b, o, 5000))
             return -1;
+        for (;;) {
+            if (ct_control_recv(c, &h, reply, sizeof reply, &n, 5000))
+                return -1;
+            if (h.type == CT_MSG_PING) {
+                if (ct_control_send(c, CT_MSG_PONG, 0, reply, n, 5000))
+                    return -1;
+                continue;
+            }
+            if (h.type == CT_MSG_REQUEST_WORK_CONNECTION)
+                continue;
+            if (h.type != CT_MSG_REGISTER_OK)
+                return -1;
+            char registered_id[CT_MAX_SERVICE_ID + 1];
+            size_t reply_offset = 0;
+            if (ct_unpack_string(reply, n, &reply_offset, registered_id, sizeof registered_id) ||
+                reply_offset != n || strcmp(registered_id, s->id))
+                return -1;
+            break;
+        }
         CT_LOGI("client", "service_id=%s registered remote=%s:%u", s->id, s->remote_addr,
                 s->remote_port);
     }
@@ -115,11 +145,16 @@ static int client_session(const ct_config *cfg) {
         if (!l)
             break;
         size_t rn = 0;
-        refs[rn] = (ref){REF_CONTROL, NULL, NULL};
-        event_loop_add(l, ctl.fd, CT_EV_READ, &refs[rn++]);
+        uint64_t loop_now = ct_monotonic_ms();
+        if (loop_now >= ctl.read_retry_after_ms) {
+            refs[rn] = (ref){REF_CONTROL, NULL, NULL};
+            event_loop_add(l, ctl.fd, CT_EV_READ, &refs[rn++]);
+        }
         for (size_t i = 0; i < wn; i++) {
-            refs[rn] = (ref){REF_WORK, NULL, &work[i]};
-            event_loop_add(l, work[i].fd, CT_EV_READ, &refs[rn++]);
+            if (loop_now < work[i].read_retry_after_ms)
+                continue;
+            refs[rn] = (ref){REF_WORK, NULL, (void *)(uintptr_t)work[i].connection.fd};
+            event_loop_add(l, work[i].connection.fd, CT_EV_READ, &refs[rn++]);
         }
         for (size_t i = 0; i < MAX_RELAYS; i++)
             if (!relays[i].closed) {
@@ -130,7 +165,7 @@ static int client_session(const ct_config *cfg) {
                 refs[rn] = (ref){REF_RELAY_WORK, NULL, &relays[i]};
                 event_loop_add(l, relays[i].work, ev, &refs[rn++]);
             }
-        int ne = event_loop_wait(l, events, event_capacity, 500);
+        int ne = event_loop_wait(l, events, event_capacity, 50);
         event_loop_destroy(l);
         if (ne < 0)
             break;
@@ -140,35 +175,66 @@ static int client_session(const ct_config *cfg) {
                 uint8_t b[CT_CONTROL_BUFFER_SIZE];
                 size_t n;
                 ct_frame_header h;
+                int available = ct_frame_available(ctl.fd, CT_CONTROL_BUFFER_SIZE + CT_AEAD_TAG,
+                                                   CT_FLAG_ENCRYPTED, &h);
+                if (available < 0)
+                    goto done;
+                if (!available) {
+                    ctl.read_retry_after_ms = ct_monotonic_ms() + 50;
+                    continue;
+                }
+                ctl.read_retry_after_ms = 0;
                 if (ct_control_recv(&ctl, &h, b, sizeof b, &n, 5000))
                     goto done;
                 if (h.type == CT_MSG_PING) {
                     if (ct_control_send(&ctl, CT_MSG_PONG, 0, b, n, 5000))
                         goto done;
+                } else if (h.type == CT_MSG_PONG) {
+                    /* Expected response to the client's authenticated heartbeat. */
                 } else if (h.type == CT_MSG_REQUEST_WORK_CONNECTION) {
                     (void)add_work(cfg, &ctl, work, &wn);
                 } else if (h.type == CT_MSG_GOAWAY)
                     goto done;
+                else
+                    goto done;
             } else if (r->kind == REF_WORK) {
-                idle_work *iw = (idle_work *)r->ptr;
+                ct_socket work_fd = (ct_socket)(uintptr_t)r->ptr;
+                size_t wi;
+                idle_work *iw = find_work(work, wn, work_fd, &wi);
+                if (!iw)
+                    continue;
                 char id[CT_MAX_SERVICE_ID + 1];
                 uint64_t sid;
                 ct_enc_mode em;
                 uint8_t rnd[32];
-                ct_socket wf = iw->fd;
-                size_t wi = (size_t)(iw - work);
+                ct_frame_header start_header;
+                int available = ct_plain_frame_available(iw->connection.fd, CT_CONTROL_BUFFER_SIZE,
+                                                         &start_header);
+                if (available < 0) {
+                    ct_socket_close(iw->connection.fd);
+                    work[wi] = work[--wn];
+                    continue;
+                }
+                if (!available) {
+                    iw->read_retry_after_ms = ct_monotonic_ms() + 50;
+                    continue;
+                }
+                ct_work wf = iw->connection;
                 work[wi] = work[--wn];
-                if (ct_start_stream_recv(wf, &ctl, id, sizeof id, &sid, &em, rnd)) {
-                    ct_socket_close(wf);
+                if (ct_start_stream_recv(&wf, &ctl, id, sizeof id, &sid, &em, rnd)) {
+                    CT_LOGW("client", "rejected START_STREAM on authenticated work connection");
+                    ct_socket_close(wf.fd);
                     continue;
                 }
                 const ct_service_config *s = client_svc(cfg, id);
+                if (s && s->encryption != em)
+                    s = NULL;
                 ct_socket local =
                     s ? ct_net_connect(s->local_addr, s->local_port, cfg->connect_timeout)
                       : CT_INVALID_SOCKET;
                 if (local == CT_INVALID_SOCKET) {
-                    ct_stream_ready_send(wf, &ctl, sid, rnd, 0);
-                    ct_socket_close(wf);
+                    ct_stream_ready_send(&wf, &ctl, id, em, sid, rnd, 0);
+                    ct_socket_close(wf.fd);
                 } else {
                     ct_relay *rr = NULL;
                     for (size_t j = 0; j < MAX_RELAYS; j++)
@@ -176,16 +242,16 @@ static int client_session(const ct_config *cfg) {
                             rr = &relays[j];
                             break;
                         }
-                    if (!rr || ct_stream_ready_send(wf, &ctl, sid, rnd, 1) ||
-                        ct_relay_init(rr, local, wf, 1, em, ctl.cipher,
+                    if (!rr || ct_stream_ready_send(&wf, &ctl, id, em, sid, rnd, 1) ||
+                        ct_relay_init(rr, local, wf.fd, 1, em, ctl.cipher,
 #ifdef CONFIG_FEATURE_DATA_ENCRYPTION
                                       ctl.keys.data_master,
 #else
                                       NULL,
 #endif
-                                      sid, rnd)) {
+                                      sid, rnd, wf.id, id)) {
                         ct_socket_close(local);
-                        ct_socket_close(wf);
+                        ct_socket_close(wf.fd);
                     }
                 }
 #ifdef CONFIG_FEATURE_WORK_POOL
@@ -214,7 +280,7 @@ done:
     if (ct_runtime_should_stop())
         (void)ct_control_send(&ctl, CT_MSG_GOAWAY, 0, NULL, 0, 100);
     for (size_t i = 0; i < wn; i++)
-        ct_socket_close(work[i].fd);
+        ct_socket_close(work[i].connection.fd);
     for (size_t i = 0; i < MAX_RELAYS; i++)
         if (!relays[i].closed)
             ct_relay_close(&relays[i]);

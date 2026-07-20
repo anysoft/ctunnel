@@ -1,4 +1,5 @@
 #include "ctunnel.h"
+#include "ctunnel/crypto.h"
 #include "util/log.h"
 #include <ctype.h>
 #include <errno.h>
@@ -9,8 +10,38 @@
 #include <ws2tcpip.h>
 #else
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #endif
+
+static FILE *open_policy_file(const char *path) {
+#ifdef _WIN32
+    return fopen(path, "rb");
+#else
+    int flags = O_RDONLY;
+#ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
+#endif
+#ifdef O_NOFOLLOW
+    flags |= O_NOFOLLOW;
+#endif
+    int fd = open(path, flags);
+    if (fd < 0)
+        return NULL;
+    struct stat st;
+    if (fstat(fd, &st) || !S_ISREG(st.st_mode) || (st.st_mode & 022)) {
+        int saved_errno = errno ? errno : EPERM;
+        close(fd);
+        errno = saved_errno;
+        return NULL;
+    }
+    FILE *file = fdopen(fd, "rb");
+    if (!file)
+        close(fd);
+    return file;
+#endif
+}
 
 static void defaults(ct_config *c) {
     memset(c, 0, sizeof *c);
@@ -32,6 +63,7 @@ static void defaults(ct_config *c) {
     c->reconnect_jitter_percent = 20;
     c->pool_count = CONFIG_DEFAULT_POOL_COUNT;
     c->log_rotate_days = 7;
+    c->log_max_size_kib = 1024;
     c->max_clients = CONFIG_MAX_CLIENTS;
     c->max_services_per_client = CONFIG_MAX_SERVICES;
     c->max_streams_per_client = CONFIG_DEFAULT_MAX_STREAMS;
@@ -66,6 +98,15 @@ static int cp(char *d, size_t n, const char *s) {
     if (z >= n)
         return -1;
     memcpy(d, s, z + 1);
+    return 0;
+}
+static int key_seen(char seen[][32], size_t *count, size_t capacity, const char *key) {
+    for (size_t i = 0; i < *count; i++)
+        if (!strcmp(seen[i], key))
+            return 1;
+    if (*count == capacity || strlen(key) >= sizeof seen[0])
+        return -1;
+    memcpy(seen[(*count)++], key, strlen(key) + 1);
     return 0;
 }
 static int integer(const char *s, int lo, int hi, int *out) {
@@ -213,6 +254,7 @@ static int set_common(ct_config *c, const char *k, const char *v) {
     INT("max_streams_per_client", max_streams_per_client, 1, CONFIG_MAX_STREAMS);
     INT("max_pending_streams", max_pending_streams, 1, CONFIG_MAX_PENDING_STREAMS);
     INT("log_rotate_days", log_rotate_days, 0, 3650);
+    INT("log_max_size_kib", log_max_size_kib, 64, 1048576);
 #undef INT
     if (!strcmp(k, "control_encryption"))
         return strcmp(v, "required") ? -1 : 0;
@@ -275,14 +317,19 @@ static int set_service(ct_service_config *s, const char *k, const char *v) {
     return 1;
 }
 int ct_config_load(const char *path, ct_config *c, char *err, size_t en) {
-    FILE *f = fopen(path, "rb");
+    FILE *f = open_policy_file(path);
     if (!f) {
-        snprintf(err, en, "cannot open %s: %s", path, strerror(errno));
+        snprintf(err, en,
+                 "cannot securely open %s (must be a regular non-symlink file and not "
+                 "group/world writable): %s",
+                 path, strerror(errno));
         return -1;
     }
     defaults(c);
     cp(c->config_path, sizeof c->config_path, path);
     char line[CT_MAX_PATH * 2], section[CT_MAX_SERVICE_ID + 1] = "";
+    char common_seen[40][32] = {{0}}, section_seen[8][32] = {{0}};
+    size_t common_seen_count = 0, section_seen_count = 0;
     ct_service_config *svc = NULL;
     unsigned ln = 0;
     int rc = -1;
@@ -328,6 +375,8 @@ int ct_config_load(const char *path, ct_config *c, char *err, size_t en) {
 #endif
                 svc->encryption = c->default_data_encryption;
             }
+            memset(section_seen, 0, sizeof section_seen);
+            section_seen_count = 0;
             continue;
         }
         char *eq = strchr(p, '=');
@@ -337,6 +386,15 @@ int ct_config_load(const char *path, ct_config *c, char *err, size_t en) {
         }
         *eq = 0;
         char *k = trim(p), *v = trim(eq + 1);
+        int duplicate = svc ? key_seen(section_seen, &section_seen_count,
+                                       sizeof section_seen / sizeof section_seen[0], k)
+                            : key_seen(common_seen, &common_seen_count,
+                                       sizeof common_seen / sizeof common_seen[0], k);
+        if (duplicate) {
+            snprintf(err, en, "line %u: %s key %s", ln, duplicate > 0 ? "duplicate" : "too many",
+                     k);
+            goto out;
+        }
         int z = svc ? set_service(svc, k, v) : set_common(c, k, v);
         if (z) {
             snprintf(err, en, "line %u: %s %s '%s'", ln,
@@ -478,12 +536,59 @@ int ct_config_validate(const ct_config *c, char *e, size_t n) {
                 }
         }
     }
+    return 0;
+}
+
+int ct_config_validate_security_files(const ct_config *c, char *e, size_t n) {
 #ifndef _WIN32
     struct stat st;
-    if (stat(c->identity_private_key, &st) == 0 && (st.st_mode & 077) != 0)
-        CT_LOGW("config", "private key %s permissions are broader than 0600",
-                c->identity_private_key);
+    if (lstat(c->identity_private_key, &st) != 0) {
+        snprintf(e, n, "cannot stat identity_private_key: %s", strerror(errno));
+        return -1;
+    }
+    if (!S_ISREG(st.st_mode) || S_ISLNK(st.st_mode)) {
+        snprintf(e, n, "identity_private_key must be a regular non-symlink file");
+        return -1;
+    }
+    if ((st.st_mode & 077) != 0) {
+        snprintf(e, n, "identity_private_key permissions must be 0600 or stricter");
+        return -1;
+    }
+    if (c->mode == CT_MODE_SERVER) {
+        if (lstat(c->authorized_clients_file, &st) != 0 || !S_ISREG(st.st_mode) ||
+            S_ISLNK(st.st_mode) || (st.st_mode & 022) != 0) {
+            snprintf(e, n,
+                     "authorized_clients_file must be a regular non-symlink file and not "
+                     "group/world writable");
+            return -1;
+        }
+    }
+#else
+    (void)c;
+    (void)e;
+    (void)n;
 #endif
+    uint8_t private_key[CT_ED_SECRET];
+    if (ct_load_private_key(c->identity_private_key, private_key)) {
+        snprintf(e, n, "identity_private_key has invalid type, permissions, or encoding");
+        return -1;
+    }
+    ct_crypto_wipe(private_key, sizeof private_key);
+    if (c->mode == CT_MODE_CLIENT) {
+        uint8_t public_key[CT_ED_PUBLIC];
+        if (ct_load_public_key(c->server_public_key, public_key)) {
+            snprintf(e, n, "server_public_key has invalid type or encoding");
+            return -1;
+        }
+    } else {
+        for (size_t i = 0; i < c->client_count; i++) {
+            uint8_t public_key[CT_ED_PUBLIC];
+            if (ct_load_public_key(c->clients[i].public_key, public_key)) {
+                snprintf(e, n, "authorized client %s public key is invalid", c->clients[i].id);
+                return -1;
+            }
+        }
+    }
     return 0;
 }
 static int parse_range(const char *v, ct_port_range *r) {
@@ -498,16 +603,22 @@ static int parse_range(const char *v, ct_port_range *r) {
     return 0;
 }
 int ct_authorized_load(const char *path, ct_config *c, char *err, size_t en) {
-    FILE *f = fopen(path, "rb");
+    FILE *f = open_policy_file(path);
     if (!f) {
-        snprintf(err, en, "cannot open authorized clients %s: %s", path, strerror(errno));
+        snprintf(err, en, "cannot securely open authorized clients %s: %s", path, strerror(errno));
         return -1;
     }
     char line[CT_MAX_PATH * 2];
     ct_authorized_client *a = NULL;
+    char section_seen[4][32] = {{0}};
+    size_t section_seen_count = 0;
     unsigned ln = 0;
     while (fgets(line, sizeof line, f)) {
         ln++;
+        if (!strchr(line, '\n') && !feof(f)) {
+            snprintf(err, en, "clients line %u too long", ln);
+            goto bad;
+        }
         char *p = trim(line);
         if (!*p || *p == '#' || *p == ';')
             continue;
@@ -522,6 +633,11 @@ int ct_authorized_load(const char *path, ct_config *c, char *err, size_t en) {
                 snprintf(err, en, "too many authorized clients");
                 goto bad;
             }
+            for (size_t i = 0; i < c->client_count; i++)
+                if (!strcmp(c->clients[i].id, p + 8)) {
+                    snprintf(err, en, "duplicate authorized client %s", p + 8);
+                    goto bad;
+                }
             a = &c->clients[c->client_count++];
             memset(a, 0, sizeof *a);
             if (cp(a->id, sizeof a->id, p + 8)) {
@@ -535,6 +651,8 @@ int ct_authorized_load(const char *path, ct_config *c, char *err, size_t en) {
 #endif
             a->max_services = c->max_services_per_client;
             a->max_streams = c->max_streams_per_client;
+            memset(section_seen, 0, sizeof section_seen);
+            section_seen_count = 0;
             continue;
         }
         char *q = strchr(p, '=');
@@ -544,6 +662,15 @@ int ct_authorized_load(const char *path, ct_config *c, char *err, size_t en) {
         }
         *q = 0;
         char *k = trim(p), *v = trim(q + 1);
+        if (strcmp(k, "allow_remote_port")) {
+            int duplicate = key_seen(section_seen, &section_seen_count,
+                                     sizeof section_seen / sizeof section_seen[0], k);
+            if (duplicate) {
+                snprintf(err, en, "clients line %u: %s key %s", ln,
+                         duplicate > 0 ? "duplicate" : "too many", k);
+                goto bad;
+            }
+        }
         int badv = 0;
         if (!strcmp(k, "public_key"))
             badv = cp(a->public_key, sizeof a->public_key, v);

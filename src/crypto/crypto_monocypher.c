@@ -299,21 +299,45 @@ int ct_keygen_files(const char *private_path, const char *public_path, char *fin
 }
 #endif
 
-static int load_key(const char *path, const char *prefix, uint8_t *output, size_t expected) {
+static int load_key(const char *path, const char *prefix, uint8_t *output, size_t expected,
+                    int private_file) {
+#ifdef _WIN32
+    (void)private_file;
     FILE *file = fopen(path, "rb");
+#else
+    int flags = O_RDONLY;
+#ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
+#endif
+#ifdef O_NOFOLLOW
+    flags |= O_NOFOLLOW;
+#endif
+    int fd = open(path, flags);
+    struct stat status;
+    FILE *file = NULL;
+    if (fd >= 0 && fstat(fd, &status) == 0 && S_ISREG(status.st_mode) &&
+        (!private_file || (status.st_mode & 077) == 0))
+        file = fdopen(fd, "rb");
+    if (!file && fd >= 0)
+        close(fd);
+#endif
     if (!file)
         return -1;
     char encoded[512];
     size_t length = fread(encoded, 1, sizeof encoded - 1, file);
     int read_error = ferror(file);
+    int truncated = length == sizeof encoded - 1 && !feof(file);
     fclose(file);
-    if (read_error) {
+    if (read_error || truncated) {
         crypto_wipe(encoded, sizeof encoded);
         return -1;
     }
     encoded[length] = 0;
-    while (length && (unsigned char)encoded[length - 1] <= 32)
+    if (length && encoded[length - 1] == '\n') {
         encoded[--length] = 0;
+        if (length && encoded[length - 1] == '\r')
+            encoded[--length] = 0;
+    }
     size_t prefix_length = strlen(prefix);
     int result = -1;
     if (length > prefix_length && !memcmp(encoded, prefix, prefix_length))
@@ -325,10 +349,10 @@ static int load_key(const char *path, const char *prefix, uint8_t *output, size_
 }
 
 int ct_load_public_key(const char *path, uint8_t key[32]) {
-    return load_key(path, PUB_PREFIX, key, 32);
+    return load_key(path, PUB_PREFIX, key, 32, 0);
 }
 int ct_load_private_key(const char *path, uint8_t key[64]) {
-    return load_key(path, SEC_PREFIX, key, 64);
+    return load_key(path, SEC_PREFIX, key, 64, 1);
 }
 #ifdef CONFIG_FEATURE_FINGERPRINT
 int ct_fingerprint_file(const char *path, char *output, size_t output_size) {
@@ -369,15 +393,16 @@ int ct_derive_session(const uint8_t shared[32], const uint8_t *transcript, size_
                       ct_session_keys *keys) {
     uint8_t salt[32], session_id[8];
     crypto_blake2b(salt, sizeof salt, transcript, transcript_length);
-    int result = derive(shared, salt, "ctunnel-v2/control/c2s", keys->control_c2s, 32) ||
-                 derive(shared, salt, "ctunnel-v2/control/s2c", keys->control_s2c, 32) ||
-                 derive(shared, salt, "ctunnel-v2/nonce/c2s", keys->nonce_c2s, CT_NONCE_BASE) ||
-                 derive(shared, salt, "ctunnel-v2/nonce/s2c", keys->nonce_s2c, CT_NONCE_BASE) ||
-                 derive(shared, salt, "ctunnel-v2/work/auth", keys->work_auth_key, 32) ||
-                 derive(shared, salt, "ctunnel-v2/stream/auth", keys->stream_auth_key, 32) ||
-                 derive(shared, salt, "ctunnel-v2/session-id", session_id, sizeof session_id);
+    int result =
+        derive(shared, salt, "ctunnel-v3/control-c2s-key", keys->control_c2s, 32) ||
+        derive(shared, salt, "ctunnel-v3/control-s2c-key", keys->control_s2c, 32) ||
+        derive(shared, salt, "ctunnel-v3/control-c2s-nonce", keys->nonce_c2s, CT_NONCE_BASE) ||
+        derive(shared, salt, "ctunnel-v3/control-s2c-nonce", keys->nonce_s2c, CT_NONCE_BASE) ||
+        derive(shared, salt, "ctunnel-v3/work-auth", keys->work_auth_key, 32) ||
+        derive(shared, salt, "ctunnel-v3/stream-auth", keys->stream_auth_key, 32) ||
+        derive(shared, salt, "ctunnel-v3/session-id", session_id, sizeof session_id);
 #ifdef CONFIG_FEATURE_DATA_ENCRYPTION
-    result = result || derive(shared, salt, "ctunnel-v2/data/master", keys->data_master, 32);
+    result = result || derive(shared, salt, "ctunnel-v3/data-master", keys->data_master, 32);
 #endif
     keys->session_id = ct_get_u64(session_id);
     if (!keys->session_id)
@@ -388,17 +413,34 @@ int ct_derive_session(const uint8_t shared[32], const uint8_t *transcript, size_
 }
 
 #ifdef CONFIG_FEATURE_DATA_ENCRYPTION
-int ct_derive_data(const uint8_t master[32], uint64_t stream, const uint8_t random[32], int dir,
+int ct_derive_data(const uint8_t master[32], uint64_t stream, const uint8_t random[32],
+                   const uint8_t work_id[32], const char *service_id, ct_enc_mode mode, int dir,
                    uint8_t key[32], uint8_t nonce_base[CT_NONCE_BASE]) {
-    uint8_t context[64] = {0};
-    memcpy(context, "ctunnel-v2/data/stream", 22);
-    ct_put_u64(context + 22, stream);
-    memcpy(context + 30, random, 32);
-    context[62] = (uint8_t)dir;
-    const char *key_label = dir ? "s2c-key" : "c2s-key";
-    const char *nonce_label = dir ? "s2c-nonce" : "c2s-nonce";
+    uint8_t context[192] = {0};
+    size_t service_length = strlen(service_id);
+    if (service_length > CT_MAX_SERVICE_ID)
+        return -1;
+    size_t offset = 0;
+    memcpy(context + offset, "ctunnel-v3/data-stream", 22);
+    offset += 22;
+    ct_put_u64(context + offset, stream);
+    offset += 8;
+    memcpy(context + offset, random, 32);
+    offset += 32;
+    memcpy(context + offset, work_id, 32);
+    offset += 32;
+    ct_put_u16(context + offset, (uint16_t)service_length);
+    offset += 2;
+    memcpy(context + offset, service_id, service_length);
+    offset += service_length;
+    context[offset++] = (uint8_t)mode;
+    context[offset++] = (uint8_t)dir;
+    const char *key_label =
+        dir ? "ctunnel-v3/data-stream-s2c-key" : "ctunnel-v3/data-stream-c2s-key";
+    const char *nonce_label =
+        dir ? "ctunnel-v3/data-stream-s2c-nonce" : "ctunnel-v3/data-stream-c2s-nonce";
     uint8_t salt[32];
-    crypto_blake2b(salt, sizeof salt, context, 63);
+    crypto_blake2b(salt, sizeof salt, context, offset);
     int result = derive(master, salt, key_label, key, 32) ||
                  derive(master, salt, nonce_label, nonce_base, CT_NONCE_BASE);
     crypto_wipe(salt, sizeof salt);
@@ -415,6 +457,39 @@ static void make_nonce(uint8_t nonce[24], const uint8_t base[CT_NONCE_BASE], uin
     memcpy(nonce, base, CT_NONCE_BASE);
     ct_put_u64(nonce + CT_NONCE_BASE, sequence);
 }
+#ifdef CONFIG_FEATURE_TEST_HOOKS
+typedef struct {
+    uint8_t key_fingerprint[16];
+    uint8_t nonce[CT_CRYPTO_AEAD_NONCE_SIZE];
+} nonce_observation;
+static nonce_observation nonce_observations[4096];
+static size_t nonce_observation_count;
+
+void ct_test_nonce_tracker_reset(void) {
+    ct_secure_zero(nonce_observations, sizeof nonce_observations);
+    nonce_observation_count = 0;
+}
+
+static int record_test_nonce(const uint8_t key[32], const uint8_t nonce[24]) {
+    uint8_t fingerprint[32];
+    ct_crypto_hash(fingerprint, key, 32);
+    for (size_t i = 0; i < nonce_observation_count; i++)
+        if (ct_crypto_equal(nonce_observations[i].key_fingerprint, fingerprint, 16) &&
+            ct_crypto_equal(nonce_observations[i].nonce, nonce, 24)) {
+            ct_secure_zero(fingerprint, sizeof fingerprint);
+            return -1;
+        }
+    if (nonce_observation_count == sizeof nonce_observations / sizeof nonce_observations[0]) {
+        ct_secure_zero(fingerprint, sizeof fingerprint);
+        return -1;
+    }
+    memcpy(nonce_observations[nonce_observation_count].key_fingerprint, fingerprint, 16);
+    memcpy(nonce_observations[nonce_observation_count].nonce, nonce, 24);
+    nonce_observation_count++;
+    ct_secure_zero(fingerprint, sizeof fingerprint);
+    return 0;
+}
+#endif
 
 int ct_aead_encrypt(ct_cipher cipher, const uint8_t key[32], const uint8_t base[CT_NONCE_BASE],
                     uint64_t sequence, const uint8_t *associated_data,
@@ -424,6 +499,10 @@ int ct_aead_encrypt(ct_cipher cipher, const uint8_t key[32], const uint8_t base[
         return -1;
     uint8_t nonce[24];
     make_nonce(nonce, base, sequence);
+#ifdef CONFIG_FEATURE_TEST_HOOKS
+    if (record_test_nonce(key, nonce))
+        return -1;
+#endif
     if (ct_crypto_aead_encrypt(output, output + plaintext_length, plaintext, plaintext_length,
                                associated_data, associated_data_length, nonce, key))
         return -1;

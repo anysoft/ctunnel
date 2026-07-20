@@ -37,9 +37,14 @@ int ct_applet_load_config(const ct_run_options *options, ct_mode expected, ct_co
         snprintf(error, error_size, "configuration mode does not match this applet");
         return -1;
     }
-    if (config->mode == CT_MODE_SERVER &&
-        ct_authorized_load(config->authorized_clients_file, config, error, error_size))
+    if (ct_config_validate_security_files(config, error, error_size))
         return -1;
+    if (config->mode == CT_MODE_SERVER) {
+        if (ct_authorized_load(config->authorized_clients_file, config, error, error_size))
+            return -1;
+        if (ct_config_validate_security_files(config, error, error_size))
+            return -1;
+    }
 #ifdef CONFIG_FEATURE_COMMAND_LINE_OVERRIDE
     if (options->log_level) {
         int level = ct_log_parse_level(options->log_level);
@@ -71,7 +76,7 @@ int ct_applet_run_role(int argc, char **argv, ct_mode expected,
         return 1;
     }
     ct_log_set_level(config.log_level);
-    if (ct_log_configure(config.log_file, config.log_rotate_days)) {
+    if (ct_log_configure(config.log_file, config.log_rotate_days, config.log_max_size_kib)) {
         fprintf(stderr, "%s: cannot use log_file: %s\n", argv[0], config.log_file);
         return 1;
     }

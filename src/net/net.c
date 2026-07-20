@@ -13,6 +13,7 @@ typedef int ct_socklen;
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <poll.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <unistd.h>
 typedef struct pollfd ct_pollfd;
@@ -162,6 +163,39 @@ ct_socket ct_net_accept(ct_socket l, char *out, size_t n) {
         getnameinfo((struct sockaddr *)&ss, sl, out, (ct_socklen)n, NULL, 0, NI_NUMERICHOST);
     return f;
 }
+int ct_net_bound_endpoints_overlap(ct_socket left, ct_socket right) {
+    struct sockaddr_storage a, b;
+    ct_socklen a_length = sizeof a, b_length = sizeof b;
+    memset(&a, 0, sizeof a);
+    memset(&b, 0, sizeof b);
+    if (getsockname(left, (struct sockaddr *)&a, &a_length) != 0 ||
+        getsockname(right, (struct sockaddr *)&b, &b_length) != 0 || a.ss_family != b.ss_family)
+        return 0;
+    if (a.ss_family == AF_INET) {
+        const struct sockaddr_in *aa = (const struct sockaddr_in *)&a;
+        const struct sockaddr_in *bb = (const struct sockaddr_in *)&b;
+        if (aa->sin_port != bb->sin_port)
+            return 0;
+        return aa->sin_addr.s_addr == htonl(INADDR_ANY) ||
+               bb->sin_addr.s_addr == htonl(INADDR_ANY) ||
+               aa->sin_addr.s_addr == bb->sin_addr.s_addr;
+    }
+#ifdef CONFIG_FEATURE_IPV6
+    if (a.ss_family == AF_INET6) {
+        const struct sockaddr_in6 *aa = (const struct sockaddr_in6 *)&a;
+        const struct sockaddr_in6 *bb = (const struct sockaddr_in6 *)&b;
+        if (aa->sin6_port != bb->sin6_port)
+            return 0;
+        static const struct in6_addr any = IN6ADDR_ANY_INIT;
+        int a_any = memcmp(&aa->sin6_addr, &any, sizeof any) == 0;
+        int b_any = memcmp(&bb->sin6_addr, &any, sizeof any) == 0;
+        return a_any || b_any ||
+               (aa->sin6_scope_id == bb->sin6_scope_id &&
+                memcmp(&aa->sin6_addr, &bb->sin6_addr, sizeof aa->sin6_addr) == 0);
+    }
+#endif
+    return 0;
+}
 int ct_plain_send(ct_socket fd, uint8_t type, uint64_t session, uint64_t stream, const uint8_t *p,
                   size_t n, int ms) {
     if (n > CT_MAX_FRAME_PAYLOAD)
@@ -181,6 +215,41 @@ int ct_plain_recv(ct_socket fd, ct_frame_header *h, uint8_t *p, size_t cap, size
         return -1;
     *n = h->payload_len;
     return 0;
+}
+int ct_frame_available(ct_socket fd, size_t max_payload, uint8_t expected_flags,
+                       ct_frame_header *h) {
+    uint8_t header[CT_FRAME_HEADER_SIZE];
+#ifdef _WIN32
+    int received = recv(fd, (char *)header, sizeof header, MSG_PEEK);
+#else
+    int received = (int)recv(fd, header, sizeof header, MSG_PEEK);
+#endif
+    if (received == 0)
+        return -1;
+    if (received < 0)
+        return ct_socket_would_block() ? 0 : -1;
+    if (received < (int)sizeof header)
+        return 0;
+    if (ct_frame_header_decode(header, h) || h->flags != expected_flags ||
+        h->payload_len > max_payload)
+        return -1;
+    size_t total = CT_FRAME_HEADER_SIZE + (size_t)h->payload_len;
+    if (total < (size_t)h->payload_len)
+        return -1;
+#ifdef _WIN32
+    u_long queued = 0;
+    if (ioctlsocket(fd, FIONREAD, &queued) != 0)
+        return -1;
+    return (uint64_t)queued >= (uint64_t)total ? 1 : 0;
+#else
+    int queued = 0;
+    if (ioctl(fd, FIONREAD, &queued) != 0)
+        return -1;
+    return queued >= 0 && (size_t)queued >= total ? 1 : 0;
+#endif
+}
+int ct_plain_frame_available(ct_socket fd, size_t max_payload, ct_frame_header *h) {
+    return ct_frame_available(fd, max_payload, 0, h);
 }
 int ct_control_send(ct_control *c, uint8_t type, uint64_t stream, const uint8_t *p, size_t n,
                     int ms) {
@@ -232,14 +301,18 @@ int ct_control_recv(ct_control *c, ct_frame_header *h, uint8_t *p, size_t cap, s
     return 0;
 }
 static size_t transcript(uint8_t *out, size_t cap, const uint8_t *ch, size_t cn,
-                         const uint8_t sr[32], const uint8_t ep[32], uint8_t cipher) {
-    const char tag[] = "ctunnel-handshake-v2";
-    size_t n = sizeof(tag) - 1 + cn + 65;
+                         const uint8_t sr[32], const uint8_t ep[32], uint8_t cipher,
+                         const uint8_t client_identity[32], const uint8_t server_identity[32]) {
+    const char tag[] = "ctunnel-handshake-v3";
+    size_t n = sizeof(tag) - 1 + 5 + cn + 65 + 64;
     if (n > cap)
         return 0;
     size_t o = 0;
     memcpy(out + o, tag, sizeof(tag) - 1);
     o += sizeof(tag) - 1;
+    ct_put_u32(out + o, CT_MAGIC);
+    o += 4;
+    out[o++] = CT_PROTOCOL_VERSION;
     memcpy(out + o, ch, cn);
     o += cn;
     memcpy(out + o, sr, 32);
@@ -247,6 +320,10 @@ static size_t transcript(uint8_t *out, size_t cap, const uint8_t *ch, size_t cn,
     memcpy(out + o, ep, 32);
     o += 32;
     out[o++] = cipher;
+    memcpy(out + o, client_identity, 32);
+    o += 32;
+    memcpy(out + o, server_identity, 32);
+    o += 32;
     return o;
 }
 static size_t signature_message(uint8_t out[64], const char *role, const uint8_t *tr, size_t tn) {
@@ -269,7 +346,7 @@ static ct_cipher choose(unsigned offered, unsigned allowed, ct_cipher preferred)
 int ct_handshake_client(ct_socket fd, const ct_config *cfg, ct_control *c) {
     uint8_t idsk[64], xpk[32], xsk[32], cr[32], ch[CT_CONTROL_BUFFER_SIZE],
         reply[CT_CONTROL_BUFFER_SIZE], tr[CT_CONTROL_BUFFER_SIZE * 2], shared[32], serverpk[32],
-        signed_message[64];
+        signed_message[64], client_identity[32], server_identity[32];
     size_t o = 0, rn, tn, signed_length;
     ct_frame_header h;
     memset(c, 0, sizeof *c);
@@ -291,19 +368,22 @@ int ct_handshake_client(ct_socket fd, const ct_config *cfg, ct_control *c) {
     o += 4;
     if (ct_plain_send(fd, CT_MSG_CLIENT_HELLO, 0, 0, ch, o, cfg->handshake_timeout * 1000) ||
         ct_plain_recv(fd, &h, reply, sizeof reply, &rn, cfg->handshake_timeout * 1000) ||
-        h.type != CT_MSG_SERVER_HELLO || rn != 129)
+        h.type != CT_MSG_SERVER_HELLO || h.session_id || h.stream_id || h.sequence || rn != 129)
         goto bad;
     uint8_t *sr = reply, *sep = reply + 32;
     ct_cipher selected = (ct_cipher)reply[64];
     if (selected != CT_CIPHER_CHACHA || !(cfg->cipher_mask & (1u << selected)) ||
         !ct_cipher_available(selected))
         goto bad;
-    tn = transcript(tr, sizeof tr, ch, o, sr, sep, (uint8_t)selected);
-    signed_length = signature_message(signed_message, "ctunnel server handshake v2", tr, tn);
+    ct_crypto_hash(client_identity, idsk + 32, 32);
+    ct_crypto_hash(server_identity, serverpk, 32);
+    tn = transcript(tr, sizeof tr, ch, o, sr, sep, (uint8_t)selected, client_identity,
+                    server_identity);
+    signed_length = signature_message(signed_message, "ctunnel server handshake v3", tr, tn);
     if (!tn || !signed_length || ct_ed_verify(reply + 65, signed_message, signed_length, serverpk))
         goto bad;
     uint8_t sig[64];
-    signed_length = signature_message(signed_message, "ctunnel client handshake v2", tr, tn);
+    signed_length = signature_message(signed_message, "ctunnel client handshake v3", tr, tn);
     if (!signed_length || ct_ed_sign(sig, signed_message, signed_length, idsk) ||
         ct_plain_send(fd, CT_MSG_CLIENT_AUTH, 0, 0, sig, 64, cfg->handshake_timeout * 1000) ||
         ct_x_shared(shared, xsk, sep))
@@ -334,79 +414,131 @@ bad:
     ct_secure_zero(signed_message, sizeof signed_message);
     return -1;
 }
-int ct_handshake_server(ct_socket fd, const ct_config *cfg, ct_control *c,
-                        const ct_authorized_client **auth) {
-    uint8_t ch[CT_CONTROL_BUFFER_SIZE], reply[CT_CONTROL_BUFFER_SIZE],
-        tr[CT_CONTROL_BUFFER_SIZE * 2], xpk[32], xsk[32], sr[32], shared[32], idsk[64],
-        clientpk[32], signed_message[64];
+void ct_handshake_server_abort(ct_server_handshake *handshake) {
+    ct_secure_zero(handshake, sizeof *handshake);
+}
+
+int ct_handshake_server_begin(ct_socket fd, const ct_config *cfg, ct_server_handshake *handshake) {
+    uint8_t ch[CT_CONTROL_BUFFER_SIZE], reply[CT_CONTROL_BUFFER_SIZE], xpk[32], sr[32], idsk[64],
+        signed_message[64], client_identity[32], server_identity[32];
     size_t n, o = 0, tn, signed_length;
     ct_frame_header h;
     char id[CT_MAX_CLIENT_ID + 1];
-    memset(c, 0, sizeof *c);
+    memset(handshake, 0, sizeof *handshake);
     memset(idsk, 0, sizeof idsk);
-    memset(xsk, 0, sizeof xsk);
-    memset(shared, 0, sizeof shared);
     memset(signed_message, 0, sizeof signed_message);
     if (ct_plain_recv(fd, &h, ch, sizeof ch, &n, cfg->handshake_timeout * 1000) ||
-        h.type != CT_MSG_CLIENT_HELLO || ct_unpack_string(ch, n, &o, id, sizeof id) || n - o != 68)
-        return -1;
+        h.type != CT_MSG_CLIENT_HELLO || h.session_id || h.stream_id || h.sequence ||
+        ct_unpack_string(ch, n, &o, id, sizeof id) || n - o != 68)
+        goto bad;
     const ct_authorized_client *a = ct_authorized_find(cfg, id);
-    if (!a || ct_load_public_key(a->public_key, clientpk) ||
+    if (!a || ct_load_public_key(a->public_key, handshake->client_public) ||
         ct_load_private_key(cfg->identity_private_key, idsk))
         goto bad;
     uint8_t *cep = ch + o + 32;
+    (void)cep;
     unsigned offered = ct_get_u32(ch + o + 64);
     ct_cipher selected = choose(offered, cfg->cipher_mask, cfg->preferred_cipher);
-    if (!selected || ct_x_keypair(xpk, xsk) || ct_platform_random(sr, 32))
+    if (!selected || ct_x_keypair(xpk, handshake->ephemeral_private) || ct_platform_random(sr, 32))
         goto bad;
-    tn = transcript(tr, sizeof tr, ch, n, sr, xpk, (uint8_t)selected);
+    ct_crypto_hash(client_identity, handshake->client_public, 32);
+    ct_crypto_hash(server_identity, idsk + 32, 32);
+    tn = transcript(handshake->transcript, sizeof handshake->transcript, ch, n, sr, xpk,
+                    (uint8_t)selected, client_identity, server_identity);
     if (!tn)
         goto bad;
     memcpy(reply, sr, 32);
     memcpy(reply + 32, xpk, 32);
     reply[64] = (uint8_t)selected;
-    signed_length = signature_message(signed_message, "ctunnel server handshake v2", tr, tn);
+    signed_length =
+        signature_message(signed_message, "ctunnel server handshake v3", handshake->transcript, tn);
     if (!signed_length || ct_ed_sign(reply + 65, signed_message, signed_length, idsk) ||
-        ct_plain_send(fd, CT_MSG_SERVER_HELLO, 0, 0, reply, 129, cfg->handshake_timeout * 1000) ||
-        ct_plain_recv(fd, &h, reply, sizeof reply, &n, cfg->handshake_timeout * 1000) ||
-        h.type != CT_MSG_CLIENT_AUTH || n != 64)
+        ct_plain_send(fd, CT_MSG_SERVER_HELLO, 0, 0, reply, 129, cfg->handshake_timeout * 1000))
         goto bad;
-    signed_length = signature_message(signed_message, "ctunnel client handshake v2", tr, tn);
-    if (!signed_length || ct_ed_verify(reply, signed_message, signed_length, clientpk) ||
-        ct_x_shared(shared, xsk, cep))
+    handshake->transcript_length = tn;
+    handshake->cipher = selected;
+    handshake->authorized = a;
+    memcpy(handshake->client_id, id, strlen(id) + 1);
+    ct_secure_zero(idsk, sizeof idsk);
+    ct_secure_zero(signed_message, sizeof signed_message);
+    return 0;
+bad:
+    ct_secure_zero(idsk, sizeof idsk);
+    ct_secure_zero(signed_message, sizeof signed_message);
+    ct_handshake_server_abort(handshake);
+    return -1;
+}
+
+int ct_handshake_server_finish(ct_socket fd, const ct_config *cfg, ct_server_handshake *handshake,
+                               ct_control *c, const ct_authorized_client **auth) {
+    uint8_t reply[CT_CONTROL_BUFFER_SIZE], shared[32] = {0}, signed_message[64] = {0};
+    size_t n, signed_length;
+    ct_frame_header h;
+    if (!handshake->authorized ||
+        ct_plain_recv(fd, &h, reply, sizeof reply, &n, cfg->handshake_timeout * 1000) ||
+        h.type != CT_MSG_CLIENT_AUTH || h.session_id || h.stream_id || h.sequence || n != 64)
+        goto bad;
+    signed_length = signature_message(signed_message, "ctunnel client handshake v3",
+                                      handshake->transcript, handshake->transcript_length);
+    /* CLIENT_HELLO fixes the peer ephemeral at: domain + magic/version + id-len/id + random. */
+    const size_t prefix_length = sizeof("ctunnel-handshake-v3") - 1 + 5;
+    size_t id_length = strlen(handshake->client_id);
+    size_t peer_offset = prefix_length + 2 + id_length + 32;
+    if (!signed_length ||
+        ct_ed_verify(reply, signed_message, signed_length, handshake->client_public) ||
+        peer_offset > handshake->transcript_length ||
+        handshake->transcript_length - peer_offset < CT_X_PUBLIC ||
+        ct_x_shared(shared, handshake->ephemeral_private, handshake->transcript + peer_offset))
         goto bad;
     memset(c, 0, sizeof *c);
     c->fd = fd;
-    c->cipher = selected;
+    c->cipher = handshake->cipher;
     c->is_client = 0;
-    memcpy(c->client_id, id, strlen(id) + 1);
-    if (ct_derive_session(shared, tr, tn, &c->keys))
+    memcpy(c->client_id, handshake->client_id, strlen(handshake->client_id) + 1);
+    if (ct_derive_session(shared, handshake->transcript, handshake->transcript_length, &c->keys))
         goto bad;
     if (ct_control_send(c, CT_MSG_AUTH_OK, 0, NULL, 0, cfg->handshake_timeout * 1000))
         goto bad;
     c->last_rx_ms = c->last_tx_ms = ct_monotonic_ms();
-    *auth = a;
-    ct_secure_zero(idsk, sizeof idsk);
-    ct_secure_zero(xsk, sizeof xsk);
+    *auth = handshake->authorized;
     ct_secure_zero(shared, sizeof shared);
     ct_secure_zero(signed_message, sizeof signed_message);
+    ct_handshake_server_abort(handshake);
     return 0;
 bad:
     ct_secure_zero(&c->keys, sizeof c->keys);
-    ct_secure_zero(idsk, sizeof idsk);
-    ct_secure_zero(xsk, sizeof xsk);
     ct_secure_zero(shared, sizeof shared);
     ct_secure_zero(signed_message, sizeof signed_message);
+    ct_handshake_server_abort(handshake);
     return -1;
 }
-static void workmac(uint8_t out[32], const ct_control *c, const uint8_t work_id[32]) {
-    uint8_t b[55];
-    memcpy(b, "ctunnel-work-v2", 15);
-    ct_put_u64(b + 15, c->keys.session_id);
-    memcpy(b + 23, work_id, 32);
-    ct_crypto_mac(out, c->keys.work_auth_key, b, sizeof b);
+
+int ct_handshake_server(ct_socket fd, const ct_config *cfg, ct_control *c,
+                        const ct_authorized_client **auth) {
+    ct_server_handshake handshake;
+    if (ct_handshake_server_begin(fd, cfg, &handshake))
+        return -1;
+    return ct_handshake_server_finish(fd, cfg, &handshake, c, auth);
 }
-int ct_work_connect(const ct_config *cfg, ct_control *c, ct_socket *out) {
+static void workmac(uint8_t out[32], const ct_control *c, const uint8_t work_id[32]) {
+    uint8_t b[160];
+    const char label[] = "ctunnel-v3/work-bind/client-to-server";
+    size_t client_length = strlen(c->client_id), offset = 0;
+    memcpy(b + offset, label, sizeof label - 1);
+    offset += sizeof label - 1;
+    ct_put_u64(b + offset, c->keys.session_id);
+    offset += 8;
+    ct_put_u16(b + offset, (uint16_t)client_length);
+    offset += 2;
+    memcpy(b + offset, c->client_id, client_length);
+    offset += client_length;
+    b[offset++] = CT_MSG_WORK_CONNECTION_BIND;
+    memcpy(b + offset, work_id, 32);
+    offset += 32;
+    ct_crypto_mac(out, c->keys.work_auth_key, b, offset);
+    ct_secure_zero(b, sizeof b);
+}
+int ct_work_connect(const ct_config *cfg, ct_control *c, ct_work *out) {
     ct_socket f = ct_net_connect(cfg->server_addr, cfg->server_port, cfg->connect_timeout);
     if (f == CT_INVALID_SOCKET)
         return -1;
@@ -427,7 +559,8 @@ int ct_work_connect(const ct_config *cfg, ct_control *c, ct_socket *out) {
         ct_socket_close(f);
         return -1;
     }
-    *out = f;
+    out->fd = f;
+    memcpy(out->id, p, 32);
     return 0;
 }
 static int accept_work_sequence(ct_control *c, uint64_t sequence) {
@@ -448,83 +581,148 @@ static int accept_work_sequence(ct_control *c, uint64_t sequence) {
     c->work_rx_bitmap |= bit;
     return 0;
 }
-int ct_work_accept_bind(ct_socket f, ct_control *c) {
+int ct_work_accept_bind(ct_socket f, ct_control *c, ct_work *out) {
     ct_frame_header h;
     uint8_t p[64], m[32];
     size_t n;
     if (ct_plain_recv(f, &h, p, sizeof p, &n, 5000) || h.type != CT_MSG_WORK_CONNECTION_BIND ||
-        h.session_id != c->keys.session_id || n != 64)
+        h.session_id != c->keys.session_id || h.stream_id || h.sequence || n != 64)
         return -1;
     workmac(m, c, p);
     if (!ct_crypto_equal(m, p + 32, 32))
         return -1;
-    return accept_work_sequence(c, ct_get_u64(p));
+    if (accept_work_sequence(c, ct_get_u64(p)))
+        return -1;
+    out->fd = f;
+    memcpy(out->id, p, 32);
+    return 0;
 }
-static void streammac(uint8_t out[32], const ct_control *c, const uint8_t *p, size_t n) {
-    ct_crypto_mac(out, c->keys.stream_auth_key, p, n);
+static int streammac(uint8_t out[32], const ct_control *c, uint8_t message_type,
+                     uint8_t sender_role, const uint8_t work_id[32], const char *service_id,
+                     ct_enc_mode mode, uint64_t stream_id, const uint8_t random[32], uint8_t ok) {
+    uint8_t authenticated[256];
+    const char label[] = "ctunnel-v3/stream-binding";
+    size_t client_length = strlen(c->client_id), service_length = strlen(service_id), offset = 0;
+    if (client_length > CT_MAX_CLIENT_ID || service_length > CT_MAX_SERVICE_ID)
+        return -1;
+    memcpy(authenticated + offset, label, sizeof label - 1);
+    offset += sizeof label - 1;
+    ct_put_u64(authenticated + offset, c->keys.session_id);
+    offset += 8;
+    ct_put_u16(authenticated + offset, (uint16_t)client_length);
+    offset += 2;
+    memcpy(authenticated + offset, c->client_id, client_length);
+    offset += client_length;
+    memcpy(authenticated + offset, work_id, 32);
+    offset += 32;
+    ct_put_u16(authenticated + offset, (uint16_t)service_length);
+    offset += 2;
+    memcpy(authenticated + offset, service_id, service_length);
+    offset += service_length;
+    ct_put_u64(authenticated + offset, stream_id);
+    offset += 8;
+    memcpy(authenticated + offset, random, 32);
+    offset += 32;
+    authenticated[offset++] = (uint8_t)mode;
+    authenticated[offset++] = message_type;
+    authenticated[offset++] = sender_role;
+    authenticated[offset++] = ok;
+    ct_crypto_mac(out, c->keys.stream_auth_key, authenticated, offset);
+    ct_secure_zero(authenticated, sizeof authenticated);
+    return 0;
 }
-int ct_start_stream_send(ct_socket f, const ct_control *c, const char *id, uint64_t sid,
+int ct_start_stream_send(const ct_work *work, const ct_control *c, const char *id, uint64_t sid,
                          ct_enc_mode encm, uint8_t rnd[32]) {
     uint8_t p[CT_CONTROL_BUFFER_SIZE], mac[32];
     size_t o = 0;
     if (ct_pack_string(p, sizeof p, &o, id, CT_MAX_SERVICE_ID))
         return -1;
     p[o++] = (uint8_t)encm;
+    memcpy(p + o, work->id, 32);
+    o += 32;
     if (ct_platform_random(rnd, 32))
         return -1;
     memcpy(p + o, rnd, 32);
     o += 32;
     ct_put_u64(p + o, sid);
     o += 8;
-    streammac(mac, c, p, o);
+    if (streammac(mac, c, CT_MSG_START_STREAM, 0, work->id, id, encm, sid, rnd, 1))
+        return -1;
     memcpy(p + o, mac, 32);
     o += 32;
-    return ct_plain_send(f, CT_MSG_START_STREAM, c->keys.session_id, sid, p, o, 5000);
+    return ct_plain_send(work->fd, CT_MSG_START_STREAM, c->keys.session_id, sid, p, o, 5000);
 }
-int ct_start_stream_recv(ct_socket f, const ct_control *c, char *id, size_t cap, uint64_t *sid,
-                         ct_enc_mode *encm, uint8_t rnd[32]) {
+int ct_start_stream_recv(const ct_work *work, const ct_control *c, char *id, size_t cap,
+                         uint64_t *sid, ct_enc_mode *encm, uint8_t rnd[32]) {
     ct_frame_header h;
     uint8_t p[CT_CONTROL_BUFFER_SIZE], m[32];
     size_t n, o = 0;
-    if (ct_plain_recv(f, &h, p, sizeof p, &n, 60000) || h.type != CT_MSG_START_STREAM ||
-        h.session_id != c->keys.session_id || n < 75 || ct_unpack_string(p, n, &o, id, cap) ||
-        n - o != 73)
+    if (ct_plain_recv(work->fd, &h, p, sizeof p, &n, 60000) || h.type != CT_MSG_START_STREAM ||
+        h.session_id != c->keys.session_id || h.sequence || n < 107 ||
+        ct_unpack_string(p, n, &o, id, cap) || n - o != 105)
         return -1;
     *encm = (ct_enc_mode)p[o++];
     if (*encm != CT_ENC_REQUIRED && *encm != CT_ENC_DISABLED)
         return -1;
+    if (!ct_crypto_equal(p + o, work->id, 32))
+        return -1;
+    o += 32;
     memcpy(rnd, p + o, 32);
     o += 32;
     *sid = ct_get_u64(p + o);
     o += 8;
     if (*sid != h.stream_id)
         return -1;
-    streammac(m, c, p, o);
+    if (streammac(m, c, CT_MSG_START_STREAM, 0, work->id, id, *encm, *sid, rnd, 1))
+        return -1;
     return ct_crypto_equal(m, p + o, 32) ? 0 : -1;
 }
-int ct_stream_ready_send(ct_socket f, const ct_control *c, uint64_t sid, const uint8_t rnd[32],
-                         int ok) {
-    uint8_t p[89], m[32];
-    memcpy(p, "ctunnel-ready-v2", 16);
-    ct_put_u64(p + 16, sid);
-    memcpy(p + 24, rnd, 32);
-    p[56] = (uint8_t)ok;
-    streammac(m, c, p, 57);
-    memcpy(p + 57, m, 32);
-    return ct_plain_send(f, ok ? CT_MSG_STREAM_READY : CT_MSG_STREAM_FAILED, c->keys.session_id,
-                         sid, p, 89, 5000);
+int ct_stream_ready_send(const ct_work *work, const ct_control *c, const char *service_id,
+                         ct_enc_mode mode, uint64_t sid, const uint8_t rnd[32], int ok) {
+    uint8_t p[CT_CONTROL_BUFFER_SIZE], m[32];
+    size_t o = 0;
+    uint8_t message_type = ok ? CT_MSG_STREAM_READY : CT_MSG_STREAM_FAILED;
+    if (ct_pack_string(p, sizeof p, &o, service_id, CT_MAX_SERVICE_ID))
+        return -1;
+    p[o++] = (uint8_t)mode;
+    memcpy(p + o, work->id, 32);
+    o += 32;
+    memcpy(p + o, rnd, 32);
+    o += 32;
+    ct_put_u64(p + o, sid);
+    o += 8;
+    p[o++] = (uint8_t)ok;
+    if (streammac(m, c, message_type, 1, work->id, service_id, mode, sid, rnd, (uint8_t)ok))
+        return -1;
+    memcpy(p + o, m, 32);
+    o += 32;
+    return ct_plain_send(work->fd, message_type, c->keys.session_id, sid, p, o, 5000);
 }
-int ct_stream_ready_recv(ct_socket f, const ct_control *c, uint64_t sid, const uint8_t rnd[32],
-                         int *ok) {
+int ct_stream_ready_recv(const ct_work *work, const ct_control *c, const char *service_id,
+                         ct_enc_mode mode, uint64_t sid, const uint8_t rnd[32], int *ok) {
     ct_frame_header h;
-    uint8_t p[96], m[32];
-    size_t n;
-    if (ct_plain_recv(f, &h, p, sizeof p, &n, 5000) || n != 89 || h.stream_id != sid ||
-        memcmp(p, "ctunnel-ready-v2", 16) || ct_get_u64(p + 16) != sid || memcmp(p + 24, rnd, 32))
+    uint8_t p[CT_CONTROL_BUFFER_SIZE], m[32];
+    char received_service[CT_MAX_SERVICE_ID + 1];
+    size_t n, o = 0;
+    if (ct_plain_recv(work->fd, &h, p, sizeof p, &n, 5000) || h.session_id != c->keys.session_id ||
+        h.stream_id != sid || h.sequence ||
+        (h.type != CT_MSG_STREAM_READY && h.type != CT_MSG_STREAM_FAILED) ||
+        ct_unpack_string(p, n, &o, received_service, sizeof received_service) || n - o != 106 ||
+        strcmp(received_service, service_id) || p[o++] != (uint8_t)mode ||
+        !ct_crypto_equal(p + o, work->id, 32))
         return -1;
-    streammac(m, c, p, 57);
-    if (!ct_crypto_equal(m, p + 57, 32))
+    o += 32;
+    if (memcmp(p + o, rnd, 32))
         return -1;
-    *ok = p[56] && h.type == CT_MSG_STREAM_READY;
+    o += 32;
+    if (ct_get_u64(p + o) != sid)
+        return -1;
+    o += 8;
+    uint8_t received_ok = p[o++];
+    if (received_ok > 1 ||
+        streammac(m, c, h.type, 1, work->id, service_id, mode, sid, rnd, received_ok) ||
+        !ct_crypto_equal(m, p + o, 32))
+        return -1;
+    *ok = received_ok && h.type == CT_MSG_STREAM_READY;
     return 0;
 }

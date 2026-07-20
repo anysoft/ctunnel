@@ -10,7 +10,9 @@ Mini 服务端包的上限通常是 `max_clients=1`、`max_services_per_client=4
 
 客户端通用键包括：`mode`、`server_addr`、`server_port`、`client_id`、身份密钥和服务端公钥路径、密码套件设置、心跳/握手/连接超时、重连延迟和抖动、`pool_count`、默认 DATA 加密模式，以及日志级别。
 
-日志默认同时写到标准错误和配置文件同目录的文件：服务端为 `ctunnel-server.log`，客户端为 `ctunnel-client.log`。可用 `log_file=/path/to/file.log` 指定位置；设为 `-` 或 `stderr` 时只写标准错误。日志按日期轮转为 `文件名.YYYYMMDD`，`log_rotate_days=7` 默认保留 7 天，设为 `0` 表示不清理旧轮转文件。启动成功提示不受编译期日志等级裁剪影响；普通日志仍受 `CONFIG_LOG_MAX_LEVEL_*` 限制。
+日志默认同时写到标准错误和配置文件同目录的文件：服务端为 `ctunnel-server.log`，客户端为 `ctunnel-client.log`。可用 `log_file=/path/to/file.log` 指定位置；设为 `-` 或 `stderr` 时只写标准错误。日志按日期轮转为 `文件名.YYYYMMDD`，`log_rotate_days=7` 默认保留 7 天，设为 `0` 表示不清理旧轮转文件。`log_max_size_kib=1024` 是当前日志文件的硬上限（允许 64 KiB 至 1 TiB）；达到上限后文件写入停止，stderr 仍继续。启动成功提示不受编译期日志等级裁剪影响；普通日志仍受 `CONFIG_LOG_MAX_LEVEL_*` 限制。
+
+POSIX 上主配置和授权文件必须是非符号链接的普通文件，且不得允许 group/world 写入；私钥必须为 `0600` 或更严格。程序使用不跟随符号链接的打开方式再次固定文件对象。Windows 部署必须用 ACL 提供等效保护。
 
 地址值 `*` 表示 wildcard。对于监听地址，`bind_addr=*` 和 `remote_addr=*` 在 IPv4+IPv6 构建中会同时监听 `0.0.0.0` 与 `::`；单栈构建会退化为可用地址族。只想绑定单协议族时请明确写 `0.0.0.0` 或 `::`。服务端授权中的 `allow_bind_addr=*` 表示允许客户端注册任意监听地址。
 
