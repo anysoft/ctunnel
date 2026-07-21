@@ -104,6 +104,18 @@ make
 
 相互冲突的档位、同时禁用两种角色、同时禁用两种地址族、无效日志级别、不可满足的功能依赖和超范围整数都会导致失败。构建路径和工具链参数单独记录在 `.ctunnel-configure.mk` 中；该文件不保存功能配置。
 
+## 并发与长稳验证
+
+本仓库提供独立测试工具，不会成为 ctunnel 运行时依赖：
+
+```sh
+scripts/stress-test.sh --bin build/ctunnel --connections 1000 --concurrency 100 --bytes 2048
+scripts/soak-test.sh --duration 24h --connections 500 --concurrency 200
+scripts/fault-injection-test.sh fd-limit
+```
+
+`tools/ctunnel-load.py` 可直接对任意 TCP echo 端口发起连接建立速率、慢读、慢写、半关闭和大报文测试。并发对象关系和 ownership 见 `docs/concurrency-and-lifecycle.md`。
+
 ## 源码级裁剪
 
 CMake 只读取生成的 `config.cmake`，并按条件加入：

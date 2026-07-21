@@ -88,7 +88,9 @@ int event_loop_wait(ct_event_loop *l, ct_event *out, size_t cap, int ms) {
         out[x].user = i->user;
         out[x].events =
             ((e[x].events & (EPOLLIN | EPOLLRDHUP | EPOLLHUP | EPOLLERR)) ? CT_EV_READ : 0) |
-            ((e[x].events & EPOLLOUT) ? CT_EV_WRITE : 0);
+            ((e[x].events & EPOLLOUT) ? CT_EV_WRITE : 0) |
+            ((e[x].events & EPOLLERR) ? CT_EV_ERROR : 0) |
+            ((e[x].events & (EPOLLRDHUP | EPOLLHUP)) ? CT_EV_HANGUP : 0);
     }
     free(e);
     return n;

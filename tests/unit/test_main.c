@@ -1,6 +1,7 @@
 #include "ctunnel.h"
 #include "ctunnel/crypto.h"
 #include "net/net.h"
+#include "net/proxy_protocol.h"
 #include "net/relay.h"
 #include "platform/platform.h"
 #include "protocol/protocol.h"
@@ -44,6 +45,24 @@ static void hex(uint8_t *out, const char *text, size_t length) {
         out[i] = (uint8_t)((high << 4) | low);
     }
 }
+static ct_stream_metadata proxy_metadata(uint8_t mode) {
+    ct_stream_metadata metadata;
+    memset(&metadata, 0, sizeof metadata);
+    metadata.proxy_protocol = (ct_proxy_protocol_mode)mode;
+    metadata.source.family = 4;
+    metadata.source.addr[0] = 192;
+    metadata.source.addr[1] = 0;
+    metadata.source.addr[2] = 2;
+    metadata.source.addr[3] = 10;
+    metadata.source.port = 12345;
+    metadata.destination.family = 4;
+    metadata.destination.addr[0] = 198;
+    metadata.destination.addr[1] = 51;
+    metadata.destination.addr[2] = 100;
+    metadata.destination.addr[3] = 20;
+    metadata.destination.port = 8443;
+    return metadata;
+}
 
 static void test_frame(void) {
     ct_frame_header h = {CT_MSG_PING, CT_FLAG_ENCRYPTED, 123, 0x1122334455667788ULL, 4, 9}, q;
@@ -66,6 +85,56 @@ static void test_frame(void) {
     b[5] = 99;
     b[7] = CT_FRAME_HEADER_SIZE;
     T(ct_frame_header_decode(b, &q) != 0);
+}
+
+static void test_proxy_protocol_vectors(void) {
+#ifdef CONFIG_FEATURE_PROXY_PROTOCOL
+    ct_stream_metadata metadata = proxy_metadata(CT_PROXY_PROTOCOL_V1);
+    uint8_t out[CT_PROXY_PROTOCOL_MAX_HEADER];
+    size_t n = 0;
+#ifdef CONFIG_FEATURE_PROXY_PROTOCOL_V1
+    const char expected_v1[] = "PROXY TCP4 192.0.2.10 198.51.100.20 12345 8443\r\n";
+    T(ct_proxy_protocol_build_v1(out, sizeof out, &n, &metadata) == 0);
+    T(n == sizeof expected_v1 - 1 && !memcmp(out, expected_v1, n));
+    memset(&metadata, 0, sizeof metadata);
+    metadata.proxy_protocol = CT_PROXY_PROTOCOL_V1;
+    metadata.source.family = 6;
+    metadata.destination.family = 6;
+    T(inet_pton(AF_INET6, "2001:db8::1", metadata.source.addr) == 1);
+    T(inet_pton(AF_INET6, "2001:db8::2", metadata.destination.addr) == 1);
+    metadata.source.port = 12345;
+    metadata.destination.port = 8443;
+    const char expected_v1_ipv6[] = "PROXY TCP6 2001:db8::1 2001:db8::2 12345 8443\r\n";
+    T(ct_proxy_protocol_build_v1(out, sizeof out, &n, &metadata) == 0);
+    T(n == sizeof expected_v1_ipv6 - 1 && !memcmp(out, expected_v1_ipv6, n));
+#endif
+#ifdef CONFIG_FEATURE_PROXY_PROTOCOL_V2
+    metadata = proxy_metadata(CT_PROXY_PROTOCOL_V2);
+    uint8_t expected_v2_ipv4[CT_PROXY_PROTOCOL_V2_IPV4_HEADER_SIZE];
+    hex(expected_v2_ipv4, "0d0a0d0a000d0a515549540a2111000cc000020ac6336414303920fb",
+        sizeof expected_v2_ipv4);
+    T(ct_proxy_protocol_build_v2(out, sizeof out, &n, &metadata) == 0);
+    T(n == sizeof expected_v2_ipv4 && !memcmp(out, expected_v2_ipv4, n));
+
+    memset(&metadata, 0, sizeof metadata);
+    metadata.proxy_protocol = CT_PROXY_PROTOCOL_V2;
+    metadata.source.family = 6;
+    metadata.destination.family = 6;
+    T(inet_pton(AF_INET6, "2001:db8::1", metadata.source.addr) == 1);
+    T(inet_pton(AF_INET6, "2001:db8::2", metadata.destination.addr) == 1);
+    metadata.source.port = 12345;
+    metadata.destination.port = 8443;
+    uint8_t expected_v2_ipv6[CT_PROXY_PROTOCOL_V2_IPV6_HEADER_SIZE];
+    hex(expected_v2_ipv6,
+        "0d0a0d0a000d0a515549540a21210024"
+        "20010db8000000000000000000000001"
+        "20010db8000000000000000000000002"
+        "303920fb",
+        sizeof expected_v2_ipv6);
+    T(ct_proxy_protocol_build_v2(out, sizeof out, &n, &metadata) == 0);
+    T(n == sizeof expected_v2_ipv6 && !memcmp(out, expected_v2_ipv6, n));
+#endif
+#endif
 }
 
 static void test_ring(void) {
@@ -406,9 +475,9 @@ static void test_data_record_replay_rejected(void) {
     uint8_t master[32] = {1}, random[32] = {2}, work_id[32] = {3};
     ct_relay server, client;
     T(ct_relay_init(&server, public_side[1], tunnel[0], 0, CT_ENC_REQUIRED, CT_CIPHER_CHACHA,
-                    master, 55, random, work_id, "ssh") == 0);
+                    master, 55, random, work_id, "ssh", NULL) == 0);
     T(ct_relay_init(&client, local_side[1], tunnel[1], 1, CT_ENC_REQUIRED, CT_CIPHER_CHACHA, master,
-                    55, random, work_id, "ssh") == 0);
+                    55, random, work_id, "ssh", NULL) == 0);
     const uint8_t message[] = "data-record-replay";
     T(send(public_side[0], message, sizeof message, 0) == (ssize_t)sizeof message);
     T(ct_relay_process(&server, public_side[1], 1) == 0);
@@ -472,14 +541,18 @@ static void test_stream_binding_roundtrip(void) {
     for (size_t i = 0; i < sizeof sender.id; i++)
         sender.id[i] = (uint8_t)i;
     memcpy(receiver.id, sender.id, sizeof receiver.id);
-    T(ct_start_stream_send(&sender, &control, "ssh", 77, CT_ENC_REQUIRED, sent_random) == 0);
+    ct_stream_metadata metadata = proxy_metadata(CT_PROXY_PROTOCOL_OFF);
+    T(ct_start_stream_send(&sender, &control, "ssh", 77, CT_ENC_REQUIRED, &metadata, sent_random) ==
+      0);
     char service[CT_MAX_SERVICE_ID + 1];
     uint64_t stream_id = 0;
     ct_enc_mode mode = CT_ENC_DISABLED;
+    ct_stream_metadata received_metadata;
     T(ct_start_stream_recv(&receiver, &control, service, sizeof service, &stream_id, &mode,
-                           received_random) == 0);
+                           &received_metadata, received_random) == 0);
     T(!strcmp(service, "ssh") && stream_id == 77 && mode == CT_ENC_REQUIRED &&
       !memcmp(sent_random, received_random, sizeof sent_random));
+    T(received_metadata.proxy_protocol == CT_PROXY_PROTOCOL_OFF);
     T(ct_stream_ready_send(&receiver, &control, service, mode, stream_id, received_random, 1) == 0);
     int ok = 0;
     T(ct_stream_ready_recv(&sender, &control, "ssh", CT_ENC_REQUIRED, 77, sent_random, &ok) == 0);
@@ -502,13 +575,15 @@ static void test_stream_binding_rejects_wrong_context(void) {
     ct_work sender = {.fd = sockets[0]}, receiver = {.fd = sockets[1]};
     memset(sender.id, 1, sizeof sender.id);
     memset(receiver.id, 2, sizeof receiver.id);
-    T(ct_start_stream_send(&sender, &control, "ssh", 88, CT_ENC_REQUIRED, random) == 0);
+    ct_stream_metadata metadata = proxy_metadata(CT_PROXY_PROTOCOL_V2);
+    T(ct_start_stream_send(&sender, &control, "ssh", 88, CT_ENC_REQUIRED, &metadata, random) == 0);
     char service[CT_MAX_SERVICE_ID + 1];
     uint64_t stream_id;
     ct_enc_mode mode;
     uint8_t received_random[32];
+    ct_stream_metadata received_metadata;
     T(ct_start_stream_recv(&receiver, &control, service, sizeof service, &stream_id, &mode,
-                           received_random) != 0);
+                           &received_metadata, received_random) != 0);
     close(sockets[0]);
     close(sockets[1]);
 
@@ -658,6 +733,7 @@ int main(void) {
     T(!strcmp(ct_crypto_backend_name(), "Monocypher"));
     T(!strcmp(ct_crypto_backend_version(), "4.0.3"));
     test_frame();
+    test_proxy_protocol_vectors();
     test_ring();
     test_blake2b();
     test_signature();

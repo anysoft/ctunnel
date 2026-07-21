@@ -29,6 +29,21 @@ config MAX_PENDING_STREAMS
 	range 1 1024
 	default 256
 
+config MAX_UDP_SESSIONS
+	int "Maximum UDP pseudo sessions"
+	range 1 8192
+	default 1024
+
+config MAX_UDP_DATAGRAM_SIZE
+	int "Maximum UDP datagram payload size"
+	range 512 65507
+	default 1472
+
+config UDP_REPLAY_WINDOW
+	int "UDP replay window"
+	range 64 128
+	default 64
+
 config MAX_FRAME_SIZE
 	int "Maximum protocol frame size"
 	range 4096 1048576

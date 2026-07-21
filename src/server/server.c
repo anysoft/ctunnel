@@ -6,6 +6,7 @@
 #include "platform/platform.h"
 #include "protocol/protocol.h"
 #include "util/log.h"
+#include "util/metrics.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,7 +25,9 @@ typedef struct server_peer server_peer;
 typedef struct {
     ct_service_config cfg;
     ct_socket listen_fd[2];
+    ct_socket udp_fd[2];
     size_t listen_n;
+    size_t udp_n;
 } server_service;
 typedef struct {
     ct_socket fd[2];
@@ -33,8 +36,18 @@ typedef struct {
 typedef struct {
     ct_socket fd;
     server_service *svc;
+    ct_stream_metadata metadata;
     uint64_t deadline;
 } pending_conn;
+#ifdef CONFIG_FEATURE_UDP
+typedef struct {
+    int active;
+    uint64_t id, tx_seq, rx_high, rx_bitmap, last_ms;
+    ct_udp_endpoint peer;
+    server_service *svc;
+    ct_socket listener;
+} server_udp_session;
+#endif
 typedef struct {
     pending_conn pending;
     ct_work work;
@@ -61,6 +74,9 @@ struct server_peer {
     size_t work_n;
     pending_conn pending[MAX_PENDING];
     size_t pending_n;
+#ifdef CONFIG_FEATURE_UDP
+    server_udp_session udp[CONFIG_MAX_UDP_SESSIONS];
+#endif
     starting_conn starting[MAX_PENDING];
     size_t starting_n;
     ct_relay relays[MAX_RELAYS];
@@ -71,6 +87,7 @@ enum {
     REF_INCOMING,
     REF_CONTROL,
     REF_SERVICE,
+    REF_UDP_SERVICE,
     REF_WORK,
     REF_STARTING,
     REF_RELAY_DIRECT,
@@ -135,10 +152,17 @@ static void peer_close(server_peer *p) {
     for (size_t i = 0; i < p->svc_n; i++)
         for (size_t j = 0; j < p->svc[i].listen_n; j++)
             ct_socket_close(p->svc[i].listen_fd[j]);
+    for (size_t i = 0; i < p->svc_n; i++)
+        for (size_t j = 0; j < p->svc[i].udp_n; j++)
+            ct_socket_close(p->svc[i].udp_fd[j]);
     for (size_t i = 0; i < p->work_n; i++)
         ct_socket_close(p->work[i].fd);
+    for (size_t i = 0; i < p->work_n; i++)
+        ct_metric_dec(CT_METRIC_WORK_IDLE);
     for (size_t i = 0; i < p->pending_n; i++)
         ct_socket_close(p->pending[i].fd);
+    for (size_t i = 0; i < p->pending_n; i++)
+        ct_metric_dec(CT_METRIC_PENDING_STREAMS);
     for (size_t i = 0; i < p->starting_n; i++) {
         ct_socket_close(p->starting[i].pending.fd);
         ct_socket_close(p->starting[i].work.fd);
@@ -146,6 +170,11 @@ static void peer_close(server_peer *p) {
     for (size_t i = 0; i < MAX_RELAYS; i++)
         if (!p->relays[i].closed)
             ct_relay_close(&p->relays[i]);
+#ifdef CONFIG_FEATURE_UDP
+    for (size_t i = 0; i < CONFIG_MAX_UDP_SESSIONS; i++)
+        if (p->udp[i].active)
+            ct_metric_dec(CT_METRIC_UDP_SESSIONS_ACTIVE);
+#endif
     ct_secure_zero(&p->ctl.keys, sizeof p->ctl.keys);
     memset(p, 0, sizeof *p);
     for (size_t i = 0; i < MAX_RELAYS; i++) {
@@ -154,6 +183,223 @@ static void peer_close(server_peer *p) {
         p->relays[i].work = CT_INVALID_SOCKET;
     }
 }
+
+#ifdef CONFIG_FEATURE_UDP
+static int udp_set_open(server_service *service, const char *addr, uint16_t port) {
+    service->udp_n = 0;
+    for (size_t i = 0; i < sizeof service->udp_fd / sizeof service->udp_fd[0]; i++)
+        service->udp_fd[i] = CT_INVALID_SOCKET;
+    if (!strcmp(addr, "*")) {
+#ifdef CONFIG_FEATURE_IPV4
+        service->udp_fd[service->udp_n] = ct_udp_bind("0.0.0.0", port);
+        if (service->udp_fd[service->udp_n] != CT_INVALID_SOCKET)
+            service->udp_n++;
+#endif
+#ifdef CONFIG_FEATURE_IPV6
+        service->udp_fd[service->udp_n] = ct_udp_bind("::", port);
+        if (service->udp_fd[service->udp_n] != CT_INVALID_SOCKET)
+            service->udp_n++;
+#endif
+        return service->udp_n ? 0 : -1;
+    }
+    service->udp_fd[0] = ct_udp_bind(addr, port);
+    if (service->udp_fd[0] == CT_INVALID_SOCKET)
+        return -1;
+    service->udp_n = 1;
+    return 0;
+}
+
+static int endpoint_equal(const ct_udp_endpoint *a, const ct_udp_endpoint *b) {
+    size_t n = a->family == 4 ? 4U : a->family == 6 ? 16U : 0U;
+    return n && a->family == b->family && a->port == b->port && !memcmp(a->addr, b->addr, n);
+}
+
+static int udp_replay_accept(uint64_t *high, uint64_t *bitmap, uint64_t seq) {
+    if (!seq)
+        return 0;
+    if (seq > *high) {
+        uint64_t shift = seq - *high;
+        *bitmap = shift >= 64 ? 1 : ((*bitmap << shift) | 1);
+        *high = seq;
+        return 1;
+    }
+    uint64_t behind = *high - seq;
+    if (behind >= CONFIG_UDP_REPLAY_WINDOW)
+        return 0;
+    uint64_t bit = UINT64_C(1) << behind;
+    if (*bitmap & bit)
+        return 0;
+    *bitmap |= bit;
+    return 1;
+}
+
+static server_udp_session *server_udp_find(server_peer *p, server_service *svc,
+                                           const ct_udp_endpoint *peer) {
+    for (size_t i = 0; i < CONFIG_MAX_UDP_SESSIONS; i++)
+        if (p->udp[i].active && p->udp[i].svc == svc && endpoint_equal(&p->udp[i].peer, peer))
+            return &p->udp[i];
+    return NULL;
+}
+
+static server_udp_session *server_udp_find_id(server_peer *p, uint64_t id) {
+    for (size_t i = 0; i < CONFIG_MAX_UDP_SESSIONS; i++)
+        if (p->udp[i].active && p->udp[i].id == id)
+            return &p->udp[i];
+    return NULL;
+}
+
+static server_udp_session *server_udp_create(server_peer *p, server_service *svc,
+                                             const ct_udp_endpoint *peer, ct_socket listener,
+                                             uint64_t now) {
+    size_t active = 0;
+    for (size_t i = 0; i < CONFIG_MAX_UDP_SESSIONS; i++)
+        if (p->udp[i].active)
+            active++;
+    if (active >= (size_t)svc->cfg.udp_max_sessions) {
+        ct_metric_inc(CT_METRIC_UDP_SESSIONS_REJECTED_TOTAL);
+        return NULL;
+    }
+    for (size_t i = 0; i < CONFIG_MAX_UDP_SESSIONS; i++)
+        if (!p->udp[i].active) {
+            memset(&p->udp[i], 0, sizeof p->udp[i]);
+            p->udp[i].active = 1;
+            p->udp[i].id = ++p->next_stream;
+            if (!p->udp[i].id)
+                p->udp[i].id = ++p->next_stream;
+            p->udp[i].peer = *peer;
+            p->udp[i].svc = svc;
+            p->udp[i].listener = listener;
+            p->udp[i].last_ms = now;
+            ct_metric_inc(CT_METRIC_UDP_SESSIONS_ACTIVE);
+            ct_metric_inc(CT_METRIC_UDP_SESSIONS_CREATED_TOTAL);
+            return &p->udp[i];
+        }
+    ct_metric_inc(CT_METRIC_UDP_SESSIONS_REJECTED_TOTAL);
+    return NULL;
+}
+
+static int udp_pack(uint8_t *out, size_t cap, size_t *off, uint8_t direction, uint64_t id,
+                    uint64_t seq, const char *service, const ct_udp_endpoint *peer,
+                    const uint8_t *payload, size_t payload_len) {
+    if (payload_len > UINT16_MAX)
+        return -1;
+    if (cap < 1 + 8 + 8)
+        return -1;
+    out[(*off)++] = direction;
+    ct_put_u64(out + *off, id);
+    *off += 8;
+    ct_put_u64(out + *off, seq);
+    *off += 8;
+    if (ct_pack_string(out, cap, off, service, CT_MAX_SERVICE_ID) ||
+        ct_udp_endpoint_encode(out, cap, off, peer) || cap - *off < 2 + payload_len)
+        return -1;
+    ct_put_u16(out + *off, (uint16_t)payload_len);
+    *off += 2;
+    memcpy(out + *off, payload, payload_len);
+    *off += payload_len;
+    return 0;
+}
+
+static int udp_unpack(const uint8_t *in, size_t len, uint8_t *direction, uint64_t *id,
+                      uint64_t *seq, char *service, size_t service_cap, ct_udp_endpoint *peer,
+                      const uint8_t **payload, size_t *payload_len) {
+    size_t off = 0;
+    if (len < 17)
+        return -1;
+    *direction = in[off++];
+    *id = ct_get_u64(in + off);
+    off += 8;
+    *seq = ct_get_u64(in + off);
+    off += 8;
+    if (ct_unpack_string(in, len, &off, service, service_cap) ||
+        ct_udp_endpoint_decode(in, len, &off, peer) || len - off < 2)
+        return -1;
+    *payload_len = ct_get_u16(in + off);
+    off += 2;
+    if (len - off != *payload_len)
+        return -1;
+    *payload = in + off;
+    return 0;
+}
+
+static int server_udp_from_external(server_peer *p, server_service *svc, ct_socket listener,
+                                    const ct_config *cfg, uint64_t now) {
+    uint8_t payload[CONFIG_MAX_UDP_DATAGRAM_SIZE], frame[CT_CONTROL_BUFFER_SIZE];
+    ct_udp_endpoint peer;
+    size_t payload_len = 0, frame_len = 0;
+    int rc = ct_udp_recv(listener, &peer, payload, sizeof payload, &payload_len);
+    if (rc)
+        return rc < 0 ? -1 : 0;
+    if (payload_len > (size_t)svc->cfg.udp_max_datagram_size) {
+        ct_metric_inc(CT_METRIC_UDP_DATAGRAMS_OVERSIZED_TOTAL);
+        ct_metric_inc(CT_METRIC_UDP_DATAGRAMS_DROPPED_TOTAL);
+        return 0;
+    }
+    server_udp_session *session = server_udp_find(p, svc, &peer);
+    if (!session)
+        session = server_udp_create(p, svc, &peer, listener, now);
+    if (!session) {
+        ct_metric_inc(CT_METRIC_UDP_DATAGRAMS_DROPPED_TOTAL);
+        return 0;
+    }
+    session->last_ms = now;
+    if (udp_pack(frame, sizeof frame, &frame_len, 0, session->id, ++session->tx_seq, svc->cfg.id,
+                 &peer, payload, payload_len) ||
+        ct_control_send(&p->ctl, CT_MSG_UDP_DATAGRAM, session->id, frame, frame_len, 5000)) {
+        ct_metric_inc(CT_METRIC_UDP_DATAGRAMS_DROPPED_TOTAL);
+        return -1;
+    }
+    (void)cfg;
+    ct_metric_inc(CT_METRIC_UDP_DATAGRAMS_C2S_TOTAL);
+    ct_metric_add(CT_METRIC_UDP_BYTES_C2S_TOTAL, payload_len);
+    return 0;
+}
+
+static int server_udp_from_client(server_peer *p, const uint8_t *payload, size_t payload_len,
+                                  uint64_t now) {
+    uint8_t direction;
+    uint64_t id, seq;
+    char service[CT_MAX_SERVICE_ID + 1];
+    ct_udp_endpoint peer;
+    const uint8_t *datagram;
+    size_t datagram_len;
+    if (udp_unpack(payload, payload_len, &direction, &id, &seq, service, sizeof service, &peer,
+                   &datagram, &datagram_len) ||
+        direction != 1) {
+        ct_metric_inc(CT_METRIC_UDP_DATAGRAMS_DROPPED_TOTAL);
+        return -1;
+    }
+    server_udp_session *session = server_udp_find_id(p, id);
+    if (!session || strcmp(session->svc->cfg.id, service) ||
+        !endpoint_equal(&session->peer, &peer)) {
+        ct_metric_inc(CT_METRIC_UDP_DATAGRAMS_DROPPED_TOTAL);
+        return 0;
+    }
+    if (!udp_replay_accept(&session->rx_high, &session->rx_bitmap, seq)) {
+        ct_metric_inc(CT_METRIC_UDP_REPLAY_DROPPED_TOTAL);
+        return 0;
+    }
+    session->last_ms = now;
+    int rc = ct_udp_send(session->listener, &session->peer, datagram, datagram_len);
+    if (rc < 0) {
+        ct_metric_inc(CT_METRIC_UDP_LOCAL_SEND_FAILURES_TOTAL);
+        return -1;
+    }
+    ct_metric_inc(CT_METRIC_UDP_DATAGRAMS_S2C_TOTAL);
+    ct_metric_add(CT_METRIC_UDP_BYTES_S2C_TOTAL, datagram_len);
+    return 0;
+}
+
+static void server_udp_expire(server_peer *p, uint64_t now) {
+    for (size_t i = 0; i < CONFIG_MAX_UDP_SESSIONS; i++)
+        if (p->udp[i].active &&
+            now - p->udp[i].last_ms > (uint64_t)p->udp[i].svc->cfg.udp_idle_timeout * 1000u) {
+            memset(&p->udp[i], 0, sizeof p->udp[i]);
+            ct_metric_dec(CT_METRIC_UDP_SESSIONS_ACTIVE);
+            ct_metric_inc(CT_METRIC_UDP_SESSIONS_EXPIRED_TOTAL);
+        }
+}
+#endif
 
 static int listen_set_open(listen_set *set, const char *addr, uint16_t port, int backlog) {
     memset(set, 0, sizeof *set);
@@ -227,22 +473,60 @@ static int register_service(server_peer *p, const ct_config *cfg, const listen_s
                             size_t n) {
     ct_service_config s;
     memset(&s, 0, sizeof s);
-    uint8_t type, encryption;
+    uint8_t type, encryption, proxy_protocol;
+    uint32_t udp_idle_timeout = 0, udp_reply_timeout = 0, udp_max_sessions = 0,
+             udp_max_datagram_size = 0;
     if (ct_register_request_decode(b, n, s.id, sizeof s.id, s.remote_addr, sizeof s.remote_addr,
-                                   &s.remote_port, &type, &encryption))
+                                   &s.remote_port, &type, &encryption, &proxy_protocol,
+                                   &udp_idle_timeout, &udp_reply_timeout, &udp_max_sessions,
+                                   &udp_max_datagram_size))
         return -1;
     s.type = type;
     s.encryption = (ct_enc_mode)encryption;
+    s.proxy_protocol = proxy_protocol;
+#ifdef CONFIG_FEATURE_UDP
+    s.udp_idle_timeout = udp_idle_timeout ? (int)udp_idle_timeout : 60;
+    s.udp_reply_timeout = udp_reply_timeout ? (int)udp_reply_timeout : 5;
+    s.udp_max_sessions = udp_max_sessions ? (int)udp_max_sessions : CONFIG_MAX_UDP_SESSIONS;
+    s.udp_max_datagram_size =
+        udp_max_datagram_size ? (int)udp_max_datagram_size : CONFIG_MAX_UDP_DATAGRAM_SIZE;
+#endif
     uint8_t reply[CT_CONTROL_BUFFER_SIZE];
     size_t z = 0;
     int ok = 1;
     const char *why = "";
-    if (s.type != 1) {
+    if (s.type != 1
+#ifdef CONFIG_FEATURE_UDP
+        && s.type != 2
+#endif
+    ) {
         ok = 0;
         why = "UNSUPPORTED_SERVICE_TYPE";
     } else if (s.encryption != CT_ENC_REQUIRED && s.encryption != CT_ENC_DISABLED) {
         ok = 0;
         why = "INVALID_ENCRYPTION";
+    } else if (s.proxy_protocol != CT_PROXY_PROTOCOL_OFF
+#ifdef CONFIG_FEATURE_PROXY_PROTOCOL_V1
+               && s.proxy_protocol != CT_PROXY_PROTOCOL_V1
+#endif
+#ifdef CONFIG_FEATURE_PROXY_PROTOCOL_V2
+               && s.proxy_protocol != CT_PROXY_PROTOCOL_V2
+#endif
+    ) {
+        ok = 0;
+        why = "UNSUPPORTED_SERVICE_OPTION";
+    } else if (s.type != 1 && s.proxy_protocol != CT_PROXY_PROTOCOL_OFF) {
+        ok = 0;
+        why = "UNSUPPORTED_SERVICE_OPTION";
+#ifdef CONFIG_FEATURE_UDP
+    } else if (s.type == 2 &&
+               (s.udp_idle_timeout < 1 || s.udp_idle_timeout > 86400 || s.udp_reply_timeout < 1 ||
+                s.udp_reply_timeout > 86400 || s.udp_max_sessions < 1 ||
+                s.udp_max_sessions > CONFIG_MAX_UDP_SESSIONS || s.udp_max_datagram_size < 512 ||
+                s.udp_max_datagram_size > CONFIG_MAX_UDP_DATAGRAM_SIZE)) {
+        ok = 0;
+        why = "INVALID_UDP_LIMIT";
+#endif
 #ifndef CONFIG_FEATURE_DATA_ENCRYPTION
     } else if (s.encryption == CT_ENC_REQUIRED) {
         ok = 0;
@@ -261,28 +545,54 @@ static int register_service(server_peer *p, const ct_config *cfg, const listen_s
     }
     listen_set listeners;
     memset(&listeners, 0, sizeof listeners);
-    if (ok && listen_set_open(&listeners, s.remote_addr, s.remote_port, 128)) {
+    server_service udp_service;
+    memset(&udp_service, 0, sizeof udp_service);
+    if (ok && s.type == 1 && listen_set_open(&listeners, s.remote_addr, s.remote_port, 128)) {
         ok = 0;
         why = "BIND_FAILED";
-    } else if (ok && listen_set_overlaps_existing(&listeners, control, peers, peer_count)) {
+    } else if (ok && s.type == 1 &&
+               listen_set_overlaps_existing(&listeners, control, peers, peer_count)) {
         ok = 0;
         why = "LISTENER_CONFLICT";
+#ifdef CONFIG_FEATURE_UDP
+    } else if (ok && s.type == 2) {
+        udp_service.cfg = s;
+        if (udp_set_open(&udp_service, s.remote_addr, s.remote_port)) {
+            ok = 0;
+            why = "BIND_FAILED";
+        }
+#endif
     }
     ct_pack_string(reply, sizeof reply, &z, s.id, CT_MAX_SERVICE_ID);
     if (ok) {
         server_service *ss = &p->svc[p->svc_n++];
         memset(ss, 0, sizeof *ss);
         ss->cfg = s;
-        ss->listen_n = listeners.n;
-        for (size_t i = 0; i < listeners.n; i++) {
-            ss->listen_fd[i] = listeners.fd[i];
-            listeners.fd[i] = CT_INVALID_SOCKET;
+        if (s.type == 1) {
+            ss->listen_n = listeners.n;
+            for (size_t i = 0; i < listeners.n; i++) {
+                ss->listen_fd[i] = listeners.fd[i];
+                listeners.fd[i] = CT_INVALID_SOCKET;
+            }
         }
-        CT_LOGI("server", "client_id=%s service_id=%s listening=%s:%u", p->ctl.client_id, s.id,
-                s.remote_addr, s.remote_port);
+#ifdef CONFIG_FEATURE_UDP
+        else {
+            ss->udp_n = udp_service.udp_n;
+            for (size_t i = 0; i < udp_service.udp_n; i++) {
+                ss->udp_fd[i] = udp_service.udp_fd[i];
+                udp_service.udp_fd[i] = CT_INVALID_SOCKET;
+            }
+        }
+#endif
+        CT_LOGI("server", "client_id=%s service_id=%s type=%s listening=%s:%u", p->ctl.client_id,
+                s.id, s.type == 2 ? "udp" : "tcp", s.remote_addr, s.remote_port);
         return ct_control_send(&p->ctl, CT_MSG_REGISTER_OK, 0, reply, z, 5000);
     }
     listen_set_close(&listeners);
+#ifdef CONFIG_FEATURE_UDP
+    for (size_t i = 0; i < udp_service.udp_n; i++)
+        ct_socket_close(udp_service.udp_fd[i]);
+#endif
     ct_pack_string(reply, sizeof reply, &z, why, 80);
     CT_LOGW("server", "client_id=%s service_id=%s registration failed: %s", p->ctl.client_id, s.id,
             why);
@@ -302,7 +612,7 @@ static int start_relay_begin(server_peer *p, pending_conn pending, ct_work work,
     starting.stream_id = sid;
     starting.deadline = ct_monotonic_ms() + timeout_ms;
     if (ct_start_stream_send(&work, &p->ctl, pending.svc->cfg.id, sid, pending.svc->cfg.encryption,
-                             starting.random))
+                             &pending.metadata, starting.random))
         return -1;
     p->starting[p->starting_n++] = starting;
     return 0;
@@ -330,7 +640,7 @@ static int start_relay_finish(server_peer *p, starting_conn *starting) {
                       NULL,
 #endif
                       starting->stream_id, starting->random, starting->work.id,
-                      starting->pending.svc->cfg.id))
+                      starting->pending.svc->cfg.id, NULL))
         return -1;
     CT_LOGD("server", "client_id=%s service_id=%s stream_id=%llu started", p->ctl.client_id,
             starting->pending.svc->cfg.id, (unsigned long long)starting->stream_id);
@@ -355,15 +665,21 @@ static void match_pending(server_peer *p, const ct_config *cfg) {
     while (p->pending_n && p->work_n && p->starting_n < MAX_PENDING) {
         pending_conn pc = p->pending[0];
         memmove(p->pending, p->pending + 1, (--p->pending_n) * sizeof *p->pending);
+        ct_metric_dec(CT_METRIC_PENDING_STREAMS);
         ct_work w = p->work[--p->work_n];
+        ct_metric_dec(CT_METRIC_WORK_IDLE);
         if (start_relay_begin(p, pc, w, (uint64_t)cfg->connect_timeout * UINT64_C(1000))) {
             ct_socket_close(pc.fd);
             ct_socket_close(w.fd);
+            ct_metric_inc(CT_METRIC_STREAMS_FAILED_TOTAL);
         }
     }
 }
 static int server_control(server_peer *p, const ct_config *cfg, const listen_set *control,
-                          const server_peer *peers, size_t peer_count) {
+                          const server_peer *peers, size_t peer_count, uint64_t now) {
+#ifndef CONFIG_FEATURE_UDP
+    (void)now;
+#endif
     uint8_t b[CT_CONTROL_BUFFER_SIZE];
     ct_frame_header h;
     size_t n;
@@ -371,6 +687,10 @@ static int server_control(server_peer *p, const ct_config *cfg, const listen_set
         return -1;
     if (h.type == CT_MSG_REGISTER_SERVICE)
         return register_service(p, cfg, control, peers, peer_count, b, n);
+#ifdef CONFIG_FEATURE_UDP
+    if (h.type == CT_MSG_UDP_DATAGRAM)
+        return server_udp_from_client(p, b, n, now);
+#endif
     if (h.type == CT_MSG_PING)
         return ct_control_send(&p->ctl, CT_MSG_PONG, 0, b, n, 5000);
     if (h.type == CT_MSG_PONG)
@@ -420,6 +740,15 @@ int ct_run_server(const ct_config *cfg) {
                   cfg->bind_addr, cfg->bind_port, cfg->max_clients, cfg->max_services_per_client,
                   cfg->max_streams_per_client, cfg->max_pending_streams,
                   cfg->log_file[0] ? cfg->log_file : "stderr");
+    unsigned recommended_fd =
+        (unsigned)(control_listeners.n + MAX_INCOMING +
+                   (size_t)cfg->max_clients * (1u + 2u * (size_t)cfg->max_services_per_client +
+                                               2u * (size_t)cfg->max_streams_per_client) +
+                   32u);
+    unsigned long long fd_soft = 0, fd_hard = 0;
+    ct_fd_limit_diagnostics(recommended_fd, &fd_soft, &fd_hard);
+    ct_log_status("server", "fd_limit soft=%llu hard=%llu recommended>=%u", fd_soft, fd_hard,
+                  recommended_fd);
     CT_LOGI("server", "control listening on %s:%u", cfg->bind_addr, cfg->bind_port);
     while (!ct_runtime_should_stop()) {
         ct_event_loop *loop = event_loop_create(event_capacity);
@@ -449,6 +778,12 @@ int ct_run_server(const ct_config *cfg) {
                     refs[rn] = (ref){REF_SERVICE, p, &p->svc[j]};
                     event_loop_add(loop, p->svc[j].listen_fd[k], CT_EV_READ, &refs[rn++]);
                 }
+#ifdef CONFIG_FEATURE_UDP
+                for (size_t k = 0; k < p->svc[j].udp_n; k++) {
+                    refs[rn] = (ref){REF_UDP_SERVICE, p, &p->svc[j]};
+                    event_loop_add(loop, p->svc[j].udp_fd[k], CT_EV_READ, &refs[rn++]);
+                }
+#endif
             }
             for (size_t j = 0; j < p->starting_n; j++) {
                 if (ct_monotonic_ms() < p->starting[j].read_retry_after_ms)
@@ -475,8 +810,11 @@ int ct_run_server(const ct_config *cfg) {
                 ct_socket f = ct_net_accept((ct_socket)(uintptr_t)r->ptr, remote, sizeof remote);
                 if (f == CT_INVALID_SOCKET)
                     continue;
+                ct_metric_inc(CT_METRIC_CONNECTIONS_ACCEPTED_TOTAL);
                 if (incoming_n == MAX_INCOMING ||
                     incoming_for_remote(incoming, incoming_n, remote) >= 2) {
+                    ct_metric_inc(CT_METRIC_CONNECTIONS_REJECTED_TOTAL);
+                    ct_metric_inc(CT_METRIC_RESOURCE_LIMIT_REJECTIONS_TOTAL);
                     ct_socket_close(f);
                     continue;
                 }
@@ -505,6 +843,7 @@ int ct_run_server(const ct_config *cfg) {
                     if (ct_monotonic_ms() < rate->blocked_until) {
                         CT_LOGW("server", "authentication rate-limited remote=%s",
                                 connection->remote);
+                        ct_metric_inc(CT_METRIC_AUTH_FAILURES_TOTAL);
                         remove_incoming(incoming, &incoming_n, connection, 1);
                         continue;
                     }
@@ -512,6 +851,7 @@ int ct_run_server(const ct_config *cfg) {
                         first.payload_len < 70 || first.payload_len > 2U + CT_MAX_CLIENT_ID + 68U ||
                         ct_handshake_server_begin(fd, cfg, &connection->handshake)) {
                         CT_LOGW("server", "authentication rejected remote=%s", connection->remote);
+                        ct_metric_inc(CT_METRIC_AUTH_FAILURES_TOTAL);
                         auth_rate_failed(rate, ct_monotonic_ms());
                         remove_incoming(incoming, &incoming_n, connection, 1);
                         continue;
@@ -523,9 +863,12 @@ int ct_run_server(const ct_config *cfg) {
                     ct_work accepted_work;
                     if (!p || first.stream_id || first.sequence || first.payload_len != 64 ||
                         p->work_n == MAX_WORK || ct_work_accept_bind(fd, &p->ctl, &accepted_work)) {
+                        if (p && p->work_n == MAX_WORK)
+                            ct_metric_inc(CT_METRIC_RESOURCE_LIMIT_REJECTIONS_TOTAL);
                         remove_incoming(incoming, &incoming_n, connection, 1);
                     } else {
                         p->work[p->work_n++] = accepted_work;
+                        ct_metric_inc(CT_METRIC_WORK_IDLE);
                         remove_incoming(incoming, &incoming_n, connection, 0);
                         match_pending(p, cfg);
                     }
@@ -543,6 +886,7 @@ int ct_run_server(const ct_config *cfg) {
                     if (!slot || ct_handshake_server_finish(fd, cfg, &connection->handshake,
                                                             &slot->ctl, &slot->auth)) {
                         CT_LOGW("server", "authentication rejected remote=%s", connection->remote);
+                        ct_metric_inc(CT_METRIC_AUTH_FAILURES_TOTAL);
                         auth_rate_failed(rate, ct_monotonic_ms());
                         remove_incoming(incoming, &incoming_n, connection, 1);
                     } else {
@@ -572,8 +916,8 @@ int ct_run_server(const ct_config *cfg) {
                     r->peer->ctl.read_retry_after_ms = ct_monotonic_ms() + 50;
                 else {
                     r->peer->ctl.read_retry_after_ms = 0;
-                    if (server_control(r->peer, cfg, &control_listeners, peers,
-                                       CT_MAX_AUTH_CLIENTS))
+                    if (server_control(r->peer, cfg, &control_listeners, peers, CT_MAX_AUTH_CLIENTS,
+                                       now))
                         peer_close(r->peer);
                 }
             } else if (r->kind == REF_STARTING) {
@@ -599,6 +943,17 @@ int ct_run_server(const ct_config *cfg) {
                 for (size_t i = 0; i < s->listen_n && f == CT_INVALID_SOCKET; i++)
                     f = ct_net_accept(s->listen_fd[i], NULL, 0);
                 if (f != CT_INVALID_SOCKET) {
+                    ct_stream_metadata metadata;
+                    memset(&metadata, 0, sizeof metadata);
+                    metadata.proxy_protocol = (ct_proxy_protocol_mode)s->cfg.proxy_protocol;
+                    if (ct_net_connection_endpoints(f, &metadata.source, &metadata.destination)) {
+                        CT_LOGW("server", "client_id=%s service_id=%s stream rejected reason=%s",
+                                p->ctl.client_id, s->cfg.id, "PROXY_PROTOCOL_ADDRESS_INVALID");
+                        ct_metric_inc(CT_METRIC_CONNECTIONS_REJECTED_TOTAL);
+                        ct_metric_inc(CT_METRIC_PROXY_PROTOCOL_HEADER_FAILURES_TOTAL);
+                        ct_socket_close(f);
+                        continue;
+                    }
                     size_t streams = active_streams(p);
                     const char *reject_reason = NULL;
                     if (p->pending_n >= (size_t)cfg->max_pending_streams)
@@ -617,17 +972,30 @@ int ct_run_server(const ct_config *cfg) {
                                 p->ctl.client_id, s->cfg.id, reject_reason, p->pending_n,
                                 cfg->max_pending_streams, streams, p->auth->max_streams,
                                 cfg->max_streams_per_client);
+                        ct_metric_inc(CT_METRIC_CONNECTIONS_REJECTED_TOTAL);
+                        ct_metric_inc(CT_METRIC_RESOURCE_LIMIT_REJECTIONS_TOTAL);
                         ct_socket_close(f);
                     } else {
-                        p->pending[p->pending_n++] =
-                            (pending_conn){f, s, now + (uint64_t)cfg->connect_timeout * 1000u};
+                        p->pending[p->pending_n++] = (pending_conn){
+                            f, s, metadata, now + (uint64_t)cfg->connect_timeout * 1000u};
+                        ct_metric_inc(CT_METRIC_PENDING_STREAMS);
                         if (!p->work_n)
                             (void)ct_control_send(&p->ctl, CT_MSG_REQUEST_WORK_CONNECTION, 0, NULL,
                                                   0, 1000);
                         match_pending(p, cfg);
                     }
                 }
-            } else {
+            }
+#ifdef CONFIG_FEATURE_UDP
+            else if (r->kind == REF_UDP_SERVICE) {
+                server_peer *p = r->peer;
+                server_service *s = (server_service *)r->ptr;
+                for (size_t i = 0; i < s->udp_n; i++)
+                    if (server_udp_from_external(p, s, s->udp_fd[i], cfg, now) < 0)
+                        peer_close(p);
+            }
+#endif
+            else {
                 ct_relay *rr = (ct_relay *)r->ptr;
                 ct_socket fd = r->kind == REF_RELAY_DIRECT ? rr->direct : rr->work;
                 (void)ct_relay_process(rr, fd, events[ei].events);
@@ -649,15 +1017,21 @@ int ct_run_server(const ct_config *cfg) {
                 if (p->pending[j].deadline < now) {
                     ct_socket_close(p->pending[j].fd);
                     p->pending[j] = p->pending[--p->pending_n];
+                    ct_metric_dec(CT_METRIC_PENDING_STREAMS);
+                    ct_metric_inc(CT_METRIC_STREAMS_FAILED_TOTAL);
                 } else
                     j++;
             }
             for (size_t j = 0; j < p->starting_n;) {
-                if (p->starting[j].deadline <= now)
+                if (p->starting[j].deadline <= now) {
                     remove_starting(p, j, 1);
-                else
+                    ct_metric_inc(CT_METRIC_STREAMS_FAILED_TOTAL);
+                } else
                     j++;
             }
+#ifdef CONFIG_FEATURE_UDP
+            server_udp_expire(p, now);
+#endif
             if (now - p->ctl.last_rx_ms > (uint64_t)cfg->heartbeat_timeout * 1000u) {
                 CT_LOGW("server", "heartbeat timeout client_id=%s", p->ctl.client_id);
                 peer_close(p);
@@ -672,6 +1046,7 @@ int ct_run_server(const ct_config *cfg) {
     }
     for (size_t i = 0; i < CT_MAX_AUTH_CLIENTS; i++)
         peer_close(&peers[i]);
+    ct_metrics_log_snapshot("server");
     while (incoming_n)
         remove_incoming(incoming, &incoming_n, &incoming[0], 1);
     listen_set_close(&control_listeners);

@@ -184,6 +184,7 @@ cmake --build build-arm --parallel
 - [docs/build-configuration.md](docs/build-configuration.md)：Kconfig、configure、Makefile 和 CMake 配置。
 - [docs/cross-compilation.md](docs/cross-compilation.md)：交叉编译和 SDK 注意事项。
 - [docs/link-modes.md](docs/link-modes.md)：dynamic、mostly-static、fully-static 语义。
+- [docs/concurrency-and-lifecycle.md](docs/concurrency-and-lifecycle.md)：高并发对象生命周期、事件和缓冲模型。
 - [docs/security.md](docs/security.md)：安全边界和部署注意事项。
 - [docs/protocol.md](docs/protocol.md)：线协议和密码学细节。
 - [docs/release.md](docs/release.md)：Release artifact 命名和发布规则。

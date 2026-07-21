@@ -18,6 +18,15 @@ typedef struct {
     ct_socket fd;
     uint8_t id[32];
 } ct_work;
+typedef ct_endpoint ct_udp_endpoint;
+typedef struct {
+    uint8_t direction;
+    uint64_t session_id, sequence;
+    char service[CT_MAX_SERVICE_ID + 1];
+    ct_udp_endpoint peer;
+    const uint8_t *payload;
+    size_t payload_len;
+} ct_udp_datagram;
 typedef struct {
     uint8_t transcript[CT_CONTROL_BUFFER_SIZE * 2];
     uint8_t ephemeral_private[CT_X_SECRET];
@@ -30,6 +39,16 @@ typedef struct {
 ct_socket ct_net_listen(const char *, uint16_t, int);
 ct_socket ct_net_connect(const char *, uint16_t, int);
 ct_socket ct_net_accept(ct_socket, char *, size_t);
+int ct_net_connection_endpoints(ct_socket, ct_endpoint *, ct_endpoint *);
+ct_socket ct_udp_bind(const char *, uint16_t);
+ct_socket ct_udp_open(uint8_t);
+int ct_udp_recv(ct_socket, ct_udp_endpoint *, uint8_t *, size_t, size_t *);
+int ct_udp_send(ct_socket, const ct_udp_endpoint *, const uint8_t *, size_t);
+int ct_udp_endpoint_from_host(ct_udp_endpoint *, const char *, uint16_t);
+int ct_udp_endpoint_encode(uint8_t *, size_t, size_t *, const ct_udp_endpoint *);
+int ct_udp_endpoint_decode(const uint8_t *, size_t, size_t *, ct_udp_endpoint *);
+int ct_udp_datagram_pack(uint8_t *, size_t, size_t *, const ct_udp_datagram *);
+int ct_udp_datagram_unpack(const uint8_t *, size_t, ct_udp_datagram *);
 int ct_net_bound_endpoints_overlap(ct_socket, ct_socket);
 int ct_plain_send(ct_socket, uint8_t, uint64_t, uint64_t, const uint8_t *, size_t, int);
 int ct_plain_recv(ct_socket, ct_frame_header *, uint8_t *, size_t, size_t *, int);
@@ -46,9 +65,9 @@ void ct_handshake_server_abort(ct_server_handshake *);
 int ct_work_connect(const ct_config *, ct_control *, ct_work *);
 int ct_work_accept_bind(ct_socket, ct_control *, ct_work *);
 int ct_start_stream_send(const ct_work *, const ct_control *, const char *, uint64_t, ct_enc_mode,
-                         uint8_t[32]);
+                         const ct_stream_metadata *, uint8_t[32]);
 int ct_start_stream_recv(const ct_work *, const ct_control *, char *, size_t, uint64_t *,
-                         ct_enc_mode *, uint8_t[32]);
+                         ct_enc_mode *, ct_stream_metadata *, uint8_t[32]);
 int ct_stream_ready_send(const ct_work *, const ct_control *, const char *, ct_enc_mode, uint64_t,
                          const uint8_t[32], int);
 int ct_stream_ready_recv(const ct_work *, const ct_control *, const char *, ct_enc_mode, uint64_t,

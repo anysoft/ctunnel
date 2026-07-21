@@ -23,6 +23,9 @@ typedef enum {
     CT_MSG_STREAM_READY,
     CT_MSG_STREAM_FAILED,
     CT_MSG_CLOSE_STREAM,
+    CT_MSG_UDP_DATAGRAM = 26,
+    CT_MSG_UDP_SESSION_CLOSE,
+    CT_MSG_UDP_ERROR,
     CT_MSG_PING = 30,
     CT_MSG_PONG,
     CT_MSG_ERROR,
@@ -46,5 +49,6 @@ int ct_pack_string(uint8_t *, size_t, size_t *, const char *, size_t);
 int ct_unpack_string(const uint8_t *, size_t, size_t *, char *, size_t);
 int ct_data_record_header_decode(const uint8_t[12], size_t, uint64_t, uint32_t *, uint64_t *);
 int ct_register_request_decode(const uint8_t *, size_t, char *, size_t, char *, size_t, uint16_t *,
-                               uint8_t *, uint8_t *);
+                               uint8_t *, uint8_t *, uint8_t *, uint32_t *, uint32_t *, uint32_t *,
+                               uint32_t *);
 #endif

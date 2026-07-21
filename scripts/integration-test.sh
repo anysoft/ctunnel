@@ -16,17 +16,18 @@ proxy_pid=
 slow_pid=
 # shellcheck disable=SC2329
 cleanup() {
-  [ -z "$client_pid" ] || kill "$client_pid" 2>/dev/null || true
-  [ -z "$server_pid" ] || kill "$server_pid" 2>/dev/null || true
-  [ -z "$echo_pid" ] || kill "$echo_pid" 2>/dev/null || true
-  [ -z "$proxy_pid" ] || kill "$proxy_pid" 2>/dev/null || true
-  [ -z "$slow_pid" ] || kill "$slow_pid" 2>/dev/null || true
+  [ -z "$client_pid" ] || wait_for_exit "$client_pid"
+  [ -z "$server_pid" ] || wait_for_exit "$server_pid"
+  [ -z "$echo_pid" ] || wait_for_exit "$echo_pid"
+  [ -z "$proxy_pid" ] || wait_for_exit "$proxy_pid"
+  [ -z "$slow_pid" ] || wait_for_exit "$slow_pid"
   rm -rf "$root"
 }
 trap cleanup EXIT INT TERM
 
 wait_for_exit() {
   pid=$1
+  kill "$pid" 2>/dev/null || true
   n=0
   while kill -0 "$pid" 2>/dev/null && [ "$n" -lt 50 ]; do
     n=$((n + 1))

@@ -1,11 +1,15 @@
 #ifndef CT_RELAY_H
 #define CT_RELAY_H
 #include "ctunnel/crypto.h"
+#include "net/proxy_protocol.h"
 #include "platform/platform.h"
 #include "util/ring.h"
 typedef struct {
     ct_socket direct, work;
-    int closed, direct_eof, work_eof;
+    int closed, direct_eof, work_eof, is_client, stream_accounted;
+    int proxy_header_pending;
+    size_t proxy_header_remaining;
+    size_t accounted_buffer_bytes;
 #ifdef CONFIG_FEATURE_DATA_ENCRYPTION
     int encrypted;
     ct_cipher cipher;
@@ -17,7 +21,8 @@ typedef struct {
     ct_ring to_direct, to_work;
 } ct_relay;
 int ct_relay_init(ct_relay *, ct_socket, ct_socket, int, ct_enc_mode, ct_cipher, const uint8_t[32],
-                  uint64_t, const uint8_t[32], const uint8_t[32], const char *);
+                  uint64_t, const uint8_t[32], const uint8_t[32], const char *,
+                  const ct_stream_metadata *);
 void ct_relay_close(ct_relay *);
 int ct_relay_events(const ct_relay *, ct_socket);
 int ct_relay_process(ct_relay *, ct_socket, int);

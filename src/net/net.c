@@ -163,6 +163,234 @@ ct_socket ct_net_accept(ct_socket l, char *out, size_t n) {
         getnameinfo((struct sockaddr *)&ss, sl, out, (ct_socklen)n, NULL, 0, NI_NUMERICHOST);
     return f;
 }
+
+static int endpoint_from_sockaddr(ct_endpoint *out, const struct sockaddr *sa) {
+    memset(out, 0, sizeof *out);
+    if (sa->sa_family == AF_INET) {
+        struct sockaddr_in in;
+        memcpy(&in, sa, sizeof in);
+        out->family = 4;
+        memcpy(out->addr, &in.sin_addr, 4);
+        out->port = ntohs(in.sin_port);
+        return 0;
+    }
+#ifdef CONFIG_FEATURE_IPV6
+    if (sa->sa_family == AF_INET6) {
+        struct sockaddr_in6 in6;
+        memcpy(&in6, sa, sizeof in6);
+        static const uint8_t v4prefix[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff};
+        if (!memcmp(in6.sin6_addr.s6_addr, v4prefix, sizeof v4prefix)) {
+            out->family = 4;
+            memcpy(out->addr, in6.sin6_addr.s6_addr + 12, 4);
+        } else {
+            out->family = 6;
+            memcpy(out->addr, in6.sin6_addr.s6_addr, 16);
+        }
+        out->port = ntohs(in6.sin6_port);
+        return 0;
+    }
+#endif
+    return -1;
+}
+
+int ct_net_connection_endpoints(ct_socket fd, ct_endpoint *source, ct_endpoint *destination) {
+    struct sockaddr_storage peer, local;
+    ct_socklen peer_length = sizeof peer, local_length = sizeof local;
+    if (getpeername(fd, (struct sockaddr *)&peer, &peer_length) ||
+        getsockname(fd, (struct sockaddr *)&local, &local_length) ||
+        endpoint_from_sockaddr(source, (struct sockaddr *)&peer) ||
+        endpoint_from_sockaddr(destination, (struct sockaddr *)&local))
+        return -1;
+    return 0;
+}
+
+static int sockaddr_from_endpoint(const ct_udp_endpoint *endpoint, struct sockaddr_storage *storage,
+                                  ct_socklen *length) {
+    memset(storage, 0, sizeof *storage);
+    if (endpoint->family == 4) {
+        struct sockaddr_in *in = (struct sockaddr_in *)storage;
+        in->sin_family = AF_INET;
+        memcpy(&in->sin_addr, endpoint->addr, 4);
+        in->sin_port = htons(endpoint->port);
+        *length = sizeof *in;
+        return 0;
+    }
+#ifdef CONFIG_FEATURE_IPV6
+    if (endpoint->family == 6) {
+        struct sockaddr_in6 *in6 = (struct sockaddr_in6 *)storage;
+        in6->sin6_family = AF_INET6;
+        memcpy(&in6->sin6_addr, endpoint->addr, 16);
+        in6->sin6_port = htons(endpoint->port);
+        *length = sizeof *in6;
+        return 0;
+    }
+#endif
+    return -1;
+}
+
+ct_socket ct_udp_bind(const char *a, uint16_t p) {
+    char ps[8];
+    snprintf(ps, sizeof ps, "%u", p);
+    struct addrinfo h, *res = NULL;
+    memset(&h, 0, sizeof h);
+#if defined(CONFIG_FEATURE_IPV4) && defined(CONFIG_FEATURE_IPV6)
+    h.ai_family = AF_UNSPEC;
+#elif defined(CONFIG_FEATURE_IPV6)
+    h.ai_family = AF_INET6;
+#else
+    h.ai_family = AF_INET;
+#endif
+    h.ai_socktype = SOCK_DGRAM;
+    h.ai_protocol = IPPROTO_UDP;
+    h.ai_flags = AI_PASSIVE;
+    if (getaddrinfo(a && *a ? a : NULL, ps, &h, &res))
+        return CT_INVALID_SOCKET;
+    ct_socket fd = CT_INVALID_SOCKET;
+    for (struct addrinfo *it = res; it; it = it->ai_next) {
+        fd = socket(it->ai_family, it->ai_socktype, it->ai_protocol);
+        if (fd == CT_INVALID_SOCKET)
+            continue;
+        int one = 1;
+        (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&one, sizeof one);
+#ifdef CONFIG_FEATURE_IPV6
+        if (it->ai_family == AF_INET6)
+            (void)setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, (const char *)&one, sizeof one);
+#endif
+        if (!ct_socket_nonblock(fd) && bind(fd, it->ai_addr, (ct_socklen)it->ai_addrlen) == 0)
+            break;
+        ct_socket_close(fd);
+        fd = CT_INVALID_SOCKET;
+    }
+    freeaddrinfo(res);
+    return fd;
+}
+
+ct_socket ct_udp_open(uint8_t family) {
+    int af = family == 6 ? AF_INET6 : AF_INET;
+    ct_socket fd = socket(af, SOCK_DGRAM, IPPROTO_UDP);
+    if (fd != CT_INVALID_SOCKET && ct_socket_nonblock(fd)) {
+        ct_socket_close(fd);
+        fd = CT_INVALID_SOCKET;
+    }
+    return fd;
+}
+
+int ct_udp_endpoint_from_host(ct_udp_endpoint *out, const char *addr, uint16_t port) {
+    char ps[8];
+    snprintf(ps, sizeof ps, "%u", port);
+    struct addrinfo h, *res = NULL;
+    memset(&h, 0, sizeof h);
+    h.ai_socktype = SOCK_DGRAM;
+    h.ai_protocol = IPPROTO_UDP;
+    if (getaddrinfo(addr, ps, &h, &res) || !res)
+        return -1;
+    int rc = endpoint_from_sockaddr(out, res->ai_addr);
+    freeaddrinfo(res);
+    return rc;
+}
+
+int ct_udp_recv(ct_socket fd, ct_udp_endpoint *source, uint8_t *buffer, size_t capacity,
+                size_t *length) {
+    struct sockaddr_storage ss;
+    ct_socklen sl = sizeof ss;
+#ifdef _WIN32
+    int n = recvfrom(fd, (char *)buffer, (int)capacity, 0, (struct sockaddr *)&ss, &sl);
+#else
+    int n = (int)recvfrom(fd, buffer, capacity, 0, (struct sockaddr *)&ss, &sl);
+#endif
+    if (n < 0)
+        return ct_socket_would_block() ? 1 : -1;
+    if (endpoint_from_sockaddr(source, (struct sockaddr *)&ss))
+        return -1;
+    *length = (size_t)n;
+    return 0;
+}
+
+int ct_udp_send(ct_socket fd, const ct_udp_endpoint *destination, const uint8_t *buffer,
+                size_t length) {
+    struct sockaddr_storage ss;
+    ct_socklen sl;
+    if (sockaddr_from_endpoint(destination, &ss, &sl))
+        return -1;
+#ifdef _WIN32
+    int n = sendto(fd, (const char *)buffer, (int)length, 0, (const struct sockaddr *)&ss, sl);
+#else
+    int n = (int)sendto(fd, buffer, length, 0, (const struct sockaddr *)&ss, sl);
+#endif
+    if (n < 0)
+        return ct_socket_would_block() ? 1 : -1;
+    return (size_t)n == length ? 0 : -1;
+}
+
+int ct_udp_endpoint_encode(uint8_t *buffer, size_t capacity, size_t *offset,
+                           const ct_udp_endpoint *endpoint) {
+    size_t address_length = endpoint->family == 4 ? 4U : endpoint->family == 6 ? 16U : 0U;
+    if (!address_length || *offset > capacity || capacity - *offset < 1U + address_length + 2U)
+        return -1;
+    buffer[(*offset)++] = endpoint->family;
+    memcpy(buffer + *offset, endpoint->addr, address_length);
+    *offset += address_length;
+    ct_put_u16(buffer + *offset, endpoint->port);
+    *offset += 2;
+    return 0;
+}
+
+int ct_udp_endpoint_decode(const uint8_t *buffer, size_t length, size_t *offset,
+                           ct_udp_endpoint *endpoint) {
+    if (*offset >= length)
+        return -1;
+    memset(endpoint, 0, sizeof *endpoint);
+    endpoint->family = buffer[(*offset)++];
+    size_t address_length = endpoint->family == 4 ? 4U : endpoint->family == 6 ? 16U : 0U;
+    if (!address_length || length - *offset < address_length + 2U)
+        return -1;
+    memcpy(endpoint->addr, buffer + *offset, address_length);
+    *offset += address_length;
+    endpoint->port = ct_get_u16(buffer + *offset);
+    *offset += 2;
+    return 0;
+}
+
+int ct_udp_datagram_pack(uint8_t *out, size_t cap, size_t *off, const ct_udp_datagram *datagram) {
+    if (datagram->payload_len > UINT16_MAX || cap < 1 + 8 + 8)
+        return -1;
+    out[(*off)++] = datagram->direction;
+    ct_put_u64(out + *off, datagram->session_id);
+    *off += 8;
+    ct_put_u64(out + *off, datagram->sequence);
+    *off += 8;
+    if (ct_pack_string(out, cap, off, datagram->service, CT_MAX_SERVICE_ID) ||
+        ct_udp_endpoint_encode(out, cap, off, &datagram->peer) ||
+        cap - *off < 2 + datagram->payload_len)
+        return -1;
+    ct_put_u16(out + *off, (uint16_t)datagram->payload_len);
+    *off += 2;
+    memcpy(out + *off, datagram->payload, datagram->payload_len);
+    *off += datagram->payload_len;
+    return 0;
+}
+
+int ct_udp_datagram_unpack(const uint8_t *in, size_t len, ct_udp_datagram *datagram) {
+    size_t off = 0;
+    if (len < 17)
+        return -1;
+    memset(datagram, 0, sizeof *datagram);
+    datagram->direction = in[off++];
+    datagram->session_id = ct_get_u64(in + off);
+    off += 8;
+    datagram->sequence = ct_get_u64(in + off);
+    off += 8;
+    if (ct_unpack_string(in, len, &off, datagram->service, sizeof datagram->service) ||
+        ct_udp_endpoint_decode(in, len, &off, &datagram->peer) || len - off < 2)
+        return -1;
+    datagram->payload_len = ct_get_u16(in + off);
+    off += 2;
+    if (len - off != datagram->payload_len)
+        return -1;
+    datagram->payload = in + off;
+    return 0;
+}
+
 int ct_net_bound_endpoints_overlap(ct_socket left, ct_socket right) {
     struct sockaddr_storage a, b;
     ct_socklen a_length = sizeof a, b_length = sizeof b;
@@ -599,7 +827,8 @@ int ct_work_accept_bind(ct_socket f, ct_control *c, ct_work *out) {
 }
 static int streammac(uint8_t out[32], const ct_control *c, uint8_t message_type,
                      uint8_t sender_role, const uint8_t work_id[32], const char *service_id,
-                     ct_enc_mode mode, uint64_t stream_id, const uint8_t random[32], uint8_t ok) {
+                     ct_enc_mode mode, uint64_t stream_id, const uint8_t random[32],
+                     const ct_stream_metadata *metadata, uint8_t ok) {
     uint8_t authenticated[256];
     const char label[] = "ctunnel-v3/stream-binding";
     size_t client_length = strlen(c->client_id), service_length = strlen(service_id), offset = 0;
@@ -624,6 +853,23 @@ static int streammac(uint8_t out[32], const ct_control *c, uint8_t message_type,
     memcpy(authenticated + offset, random, 32);
     offset += 32;
     authenticated[offset++] = (uint8_t)mode;
+    if (metadata) {
+        authenticated[offset++] = (uint8_t)metadata->proxy_protocol;
+        authenticated[offset++] = metadata->source.family;
+        memcpy(authenticated + offset, metadata->source.addr, sizeof metadata->source.addr);
+        offset += sizeof metadata->source.addr;
+        ct_put_u16(authenticated + offset, metadata->source.port);
+        offset += 2;
+        authenticated[offset++] = metadata->destination.family;
+        memcpy(authenticated + offset, metadata->destination.addr,
+               sizeof metadata->destination.addr);
+        offset += sizeof metadata->destination.addr;
+        ct_put_u16(authenticated + offset, metadata->destination.port);
+        offset += 2;
+    } else {
+        memset(authenticated + offset, 0, 38);
+        offset += 38;
+    }
     authenticated[offset++] = message_type;
     authenticated[offset++] = sender_role;
     authenticated[offset++] = ok;
@@ -632,7 +878,7 @@ static int streammac(uint8_t out[32], const ct_control *c, uint8_t message_type,
     return 0;
 }
 int ct_start_stream_send(const ct_work *work, const ct_control *c, const char *id, uint64_t sid,
-                         ct_enc_mode encm, uint8_t rnd[32]) {
+                         ct_enc_mode encm, const ct_stream_metadata *metadata, uint8_t rnd[32]) {
     uint8_t p[CT_CONTROL_BUFFER_SIZE], mac[32];
     size_t o = 0;
     if (ct_pack_string(p, sizeof p, &o, id, CT_MAX_SERVICE_ID))
@@ -646,20 +892,30 @@ int ct_start_stream_send(const ct_work *work, const ct_control *c, const char *i
     o += 32;
     ct_put_u64(p + o, sid);
     o += 8;
-    if (streammac(mac, c, CT_MSG_START_STREAM, 0, work->id, id, encm, sid, rnd, 1))
+    p[o++] = metadata ? (uint8_t)metadata->proxy_protocol : 0;
+    if (metadata) {
+        if (ct_udp_endpoint_encode(p, sizeof p, &o, &metadata->source) ||
+            ct_udp_endpoint_encode(p, sizeof p, &o, &metadata->destination))
+            return -1;
+    } else {
+        p[o++] = 0;
+        p[o++] = 0;
+    }
+    if (streammac(mac, c, CT_MSG_START_STREAM, 0, work->id, id, encm, sid, rnd, metadata, 1))
         return -1;
     memcpy(p + o, mac, 32);
     o += 32;
     return ct_plain_send(work->fd, CT_MSG_START_STREAM, c->keys.session_id, sid, p, o, 5000);
 }
 int ct_start_stream_recv(const ct_work *work, const ct_control *c, char *id, size_t cap,
-                         uint64_t *sid, ct_enc_mode *encm, uint8_t rnd[32]) {
+                         uint64_t *sid, ct_enc_mode *encm, ct_stream_metadata *metadata,
+                         uint8_t rnd[32]) {
     ct_frame_header h;
     uint8_t p[CT_CONTROL_BUFFER_SIZE], m[32];
     size_t n, o = 0;
     if (ct_plain_recv(work->fd, &h, p, sizeof p, &n, 60000) || h.type != CT_MSG_START_STREAM ||
-        h.session_id != c->keys.session_id || h.sequence || n < 107 ||
-        ct_unpack_string(p, n, &o, id, cap) || n - o != 105)
+        h.session_id != c->keys.session_id || h.sequence || n < 110 ||
+        ct_unpack_string(p, n, &o, id, cap))
         return -1;
     *encm = (ct_enc_mode)p[o++];
     if (*encm != CT_ENC_REQUIRED && *encm != CT_ENC_DISABLED)
@@ -673,7 +929,16 @@ int ct_start_stream_recv(const ct_work *work, const ct_control *c, char *id, siz
     o += 8;
     if (*sid != h.stream_id)
         return -1;
-    if (streammac(m, c, CT_MSG_START_STREAM, 0, work->id, id, *encm, *sid, rnd, 1))
+    memset(metadata, 0, sizeof *metadata);
+    if (o >= n)
+        return -1;
+    metadata->proxy_protocol = (ct_proxy_protocol_mode)p[o++];
+    if (metadata->proxy_protocol > CT_PROXY_PROTOCOL_V2)
+        return -1;
+    if (ct_udp_endpoint_decode(p, n, &o, &metadata->source) ||
+        ct_udp_endpoint_decode(p, n, &o, &metadata->destination) || n - o != 32)
+        return -1;
+    if (streammac(m, c, CT_MSG_START_STREAM, 0, work->id, id, *encm, *sid, rnd, metadata, 1))
         return -1;
     return ct_crypto_equal(m, p + o, 32) ? 0 : -1;
 }
@@ -692,7 +957,7 @@ int ct_stream_ready_send(const ct_work *work, const ct_control *c, const char *s
     ct_put_u64(p + o, sid);
     o += 8;
     p[o++] = (uint8_t)ok;
-    if (streammac(m, c, message_type, 1, work->id, service_id, mode, sid, rnd, (uint8_t)ok))
+    if (streammac(m, c, message_type, 1, work->id, service_id, mode, sid, rnd, NULL, (uint8_t)ok))
         return -1;
     memcpy(p + o, m, 32);
     o += 32;
@@ -720,7 +985,7 @@ int ct_stream_ready_recv(const ct_work *work, const ct_control *c, const char *s
     o += 8;
     uint8_t received_ok = p[o++];
     if (received_ok > 1 ||
-        streammac(m, c, h.type, 1, work->id, service_id, mode, sid, rnd, received_ok) ||
+        streammac(m, c, h.type, 1, work->id, service_id, mode, sid, rnd, NULL, received_ok) ||
         !ct_crypto_equal(m, p + o, 32))
         return -1;
     *ok = received_ok && h.type == CT_MSG_STREAM_READY;

@@ -296,10 +296,17 @@ static int set_service(ct_service_config *s, const char *k, const char *v) {
     if (!strcmp(k, "type")) {
         if (!strcmp(v, "tcp"))
             s->type = 1;
-        else if (!strcmp(v, "http"))
+#ifdef CONFIG_FEATURE_UDP
+        else if (!strcmp(v, "udp"))
             s->type = 2;
-        else if (!strcmp(v, "https"))
+#else
+        else if (!strcmp(v, "udp"))
+            return -2;
+#endif
+        else if (!strcmp(v, "http"))
             s->type = 3;
+        else if (!strcmp(v, "https"))
+            s->type = 4;
         else
             return -1;
         return 0;
@@ -314,6 +321,47 @@ static int set_service(ct_service_config *s, const char *k, const char *v) {
         return port(v, &s->local_port);
     if (!strcmp(k, "data_encryption"))
         return enc(v, &s->encryption);
+#ifdef CONFIG_FEATURE_PROXY_PROTOCOL
+    if (!strcmp(k, "proxy_protocol")) {
+        if (!strcmp(v, "off"))
+            s->proxy_protocol = CT_PROXY_PROTOCOL_OFF;
+#ifdef CONFIG_FEATURE_PROXY_PROTOCOL_V1
+        else if (!strcmp(v, "v1"))
+            s->proxy_protocol = CT_PROXY_PROTOCOL_V1;
+#else
+        else if (!strcmp(v, "v1"))
+            return -2;
+#endif
+#ifdef CONFIG_FEATURE_PROXY_PROTOCOL_V2
+        else if (!strcmp(v, "v2"))
+            s->proxy_protocol = CT_PROXY_PROTOCOL_V2;
+#else
+        else if (!strcmp(v, "v2"))
+            return -2;
+#endif
+        else
+            return -1;
+        return 0;
+    }
+    if (!strcmp(k, "proxy_protocol_tlv"))
+        return !strcmp(v, "off") ? 0 : -1;
+#endif
+#ifdef CONFIG_FEATURE_UDP
+    if (!strcmp(k, "udp_idle_timeout"))
+        return (s->udp_options_seen = 1, integer(v, 1, 86400, &s->udp_idle_timeout));
+    if (!strcmp(k, "udp_reply_timeout"))
+        return (s->udp_options_seen = 1, integer(v, 1, 86400, &s->udp_reply_timeout));
+    if (!strcmp(k, "udp_max_sessions"))
+        return (s->udp_options_seen = 1,
+                integer(v, 1, CONFIG_MAX_UDP_SESSIONS, &s->udp_max_sessions));
+    if (!strcmp(k, "udp_max_datagram_size"))
+        return (s->udp_options_seen = 1,
+                integer(v, 512, CONFIG_MAX_UDP_DATAGRAM_SIZE, &s->udp_max_datagram_size));
+#else
+    if (!strcmp(k, "udp_idle_timeout") || !strcmp(k, "udp_reply_timeout") ||
+        !strcmp(k, "udp_max_sessions") || !strcmp(k, "udp_max_datagram_size"))
+        return -2;
+#endif
     return 1;
 }
 int ct_config_load(const char *path, ct_config *c, char *err, size_t en) {
@@ -328,7 +376,7 @@ int ct_config_load(const char *path, ct_config *c, char *err, size_t en) {
     defaults(c);
     cp(c->config_path, sizeof c->config_path, path);
     char line[CT_MAX_PATH * 2], section[CT_MAX_SERVICE_ID + 1] = "";
-    char common_seen[40][32] = {{0}}, section_seen[8][32] = {{0}};
+    char common_seen[40][32] = {{0}}, section_seen[16][32] = {{0}};
     size_t common_seen_count = 0, section_seen_count = 0;
     ct_service_config *svc = NULL;
     unsigned ln = 0;
@@ -374,6 +422,12 @@ int ct_config_load(const char *path, ct_config *c, char *err, size_t en) {
                 strcpy(svc->local_addr, "::1");
 #endif
                 svc->encryption = c->default_data_encryption;
+#ifdef CONFIG_FEATURE_UDP
+                svc->udp_idle_timeout = 60;
+                svc->udp_reply_timeout = 5;
+                svc->udp_max_sessions = CONFIG_MAX_UDP_SESSIONS;
+                svc->udp_max_datagram_size = CONFIG_MAX_UDP_DATAGRAM_SIZE;
+#endif
             }
             memset(section_seen, 0, sizeof section_seen);
             section_seen_count = 0;
@@ -515,10 +569,28 @@ int ct_config_validate(const ct_config *c, char *e, size_t n) {
                 snprintf(e, n, "service %s: IPv%d is not compiled in", s->id, unavailable_family);
                 return -1;
             }
-            if (s->type != 1) {
-                snprintf(e, n, "service %s: unsupported service type (phase 1 is TCP only)", s->id);
+            if (s->type != 1 && s->type != 2) {
+                snprintf(e, n, "service %s: unsupported service type", s->id);
                 return -1;
             }
+#ifdef CONFIG_FEATURE_PROXY_PROTOCOL
+            if (s->type != 1 && s->proxy_protocol != CT_PROXY_PROTOCOL_OFF) {
+                snprintf(e, n, "service %s: PROXY Protocol is only supported for TCP", s->id);
+                return -1;
+            }
+#endif
+#ifndef CONFIG_FEATURE_UDP
+            if (s->type == 2) {
+                snprintf(e, n, "service %s: UDP is not compiled into this binary", s->id);
+                return -1;
+            }
+#endif
+#ifdef CONFIG_FEATURE_UDP
+            if (s->type == 1 && s->udp_options_seen) {
+                snprintf(e, n, "service %s: UDP-only option used with TCP service", s->id);
+                return -1;
+            }
+#endif
 #ifndef CONFIG_FEATURE_DATA_ENCRYPTION
             if (s->encryption != CT_ENC_DISABLED) {
                 snprintf(e, n, "service %s: data encryption is unavailable in this build", s->id);

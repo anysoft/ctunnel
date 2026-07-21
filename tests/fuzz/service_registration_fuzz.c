@@ -7,6 +7,6 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     uint16_t port;
     uint8_t type, mode;
     (void)ct_register_request_decode(data, size, service, sizeof service, address, sizeof address,
-                                     &port, &type, &mode);
+                                     &port, &type, &mode, NULL, NULL, NULL, NULL, NULL);
     return 0;
 }

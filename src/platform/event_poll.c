@@ -69,7 +69,9 @@ int event_loop_wait(ct_event_loop *l, ct_event *out, size_t cap, int ms) {
         if (l->fds[i].revents) {
             out[k].fd = l->fds[i].fd;
             out[k].events = ((l->fds[i].revents & (POLLIN | POLLHUP | POLLERR)) ? 1 : 0) |
-                            ((l->fds[i].revents & POLLOUT) ? 2 : 0);
+                            ((l->fds[i].revents & POLLOUT) ? CT_EV_WRITE : 0) |
+                            ((l->fds[i].revents & POLLERR) ? CT_EV_ERROR : 0) |
+                            ((l->fds[i].revents & POLLHUP) ? CT_EV_HANGUP : 0);
             out[k++].user = l->users[i];
             l->fds[i].revents = 0;
         }

@@ -11,6 +11,7 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
@@ -138,5 +139,28 @@ void ct_sleep_ms(unsigned n) {
     struct timespec t = {(time_t)(n / 1000u), (long)(n % 1000u) * 1000000L};
     while (nanosleep(&t, &t) != 0 && errno == EINTR) {
     }
+#endif
+}
+void ct_fd_limit_diagnostics(unsigned recommended, unsigned long long *soft,
+                             unsigned long long *hard) {
+    (void)recommended;
+#ifdef _WIN32
+    if (soft)
+        *soft = 0;
+    if (hard)
+        *hard = 0;
+#else
+    struct rlimit limit;
+    if (getrlimit(RLIMIT_NOFILE, &limit) != 0) {
+        if (soft)
+            *soft = 0;
+        if (hard)
+            *hard = 0;
+        return;
+    }
+    if (soft)
+        *soft = limit.rlim_cur == RLIM_INFINITY ? ULLONG_MAX : (unsigned long long)limit.rlim_cur;
+    if (hard)
+        *hard = limit.rlim_max == RLIM_INFINITY ? ULLONG_MAX : (unsigned long long)limit.rlim_max;
 #endif
 }

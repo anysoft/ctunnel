@@ -20,6 +20,8 @@
 #define CT_MAX_AUTH_CLIENTS CONFIG_MAX_CLIENTS
 #define CT_MAX_PORT_RANGES CONFIG_MAX_PORT_RANGES
 #define CT_MAX_FRAME_PAYLOAD CONFIG_MAX_FRAME_SIZE
+#define CT_MAX_UDP_SESSIONS CONFIG_MAX_UDP_SESSIONS
+#define CT_MAX_UDP_DATAGRAM CONFIG_MAX_UDP_DATAGRAM_SIZE
 #define CT_FRAME_HEADER_SIZE 36U
 #define CT_IO_BUFFER_SIZE CONFIG_STREAM_BUFFER_SIZE
 #define CT_CONTROL_BUFFER_SIZE CONFIG_CONTROL_BUFFER_SIZE
@@ -27,15 +29,31 @@
 typedef enum { CT_MODE_NONE, CT_MODE_SERVER, CT_MODE_CLIENT } ct_mode;
 typedef enum { CT_ENC_REQUIRED, CT_ENC_DISABLED } ct_enc_mode;
 typedef enum { CT_CIPHER_NONE = 0, CT_CIPHER_CHACHA = 1 } ct_cipher;
+typedef enum {
+    CT_PROXY_PROTOCOL_OFF = 0,
+    CT_PROXY_PROTOCOL_V1 = 1,
+    CT_PROXY_PROTOCOL_V2 = 2
+} ct_proxy_protocol_mode;
 
 typedef struct {
     uint16_t first, last;
 } ct_port_range;
 typedef struct {
+    uint8_t family;
+    uint8_t addr[16];
+    uint16_t port;
+} ct_endpoint;
+typedef struct {
+    ct_proxy_protocol_mode proxy_protocol;
+    ct_endpoint source, destination;
+} ct_stream_metadata;
+typedef struct {
     char id[CT_MAX_SERVICE_ID + 1], remote_addr[CT_MAX_ADDR + 1], local_addr[CT_MAX_ADDR + 1];
     uint16_t remote_port, local_port;
     ct_enc_mode encryption;
-    int type;
+    int type, proxy_protocol;
+    int udp_idle_timeout, udp_reply_timeout, udp_max_sessions, udp_max_datagram_size,
+        udp_options_seen;
 } ct_service_config;
 typedef struct {
     char id[CT_MAX_CLIENT_ID + 1], public_key[CT_MAX_PATH], allow_addr[CT_MAX_ADDR + 1];

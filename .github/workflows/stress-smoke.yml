@@ -1,0 +1,30 @@
+name: Stress smoke
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+permissions:
+  contents: read
+
+jobs:
+  stress-smoke:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - run: sudo apt-get update && sudo apt-get install -y cmake ninja-build binutils
+      - run: python3 scripts/kconfig/configure.py --config build/.config --build-dir build --target linux defconfig configs/default_defconfig
+      - run: scripts/config --file build/.config --build-dir build --target linux --enable CTUNNEL_LINK_DYNAMIC
+      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCTUNNEL_KCONFIG_CONFIG=build/.config -DCTUNNEL_BUILD_TESTS=ON
+      - run: cmake --build build --verbose
+      - run: ctest --test-dir build --output-on-failure
+      - name: Stress 100 concurrent / 1000 short connections
+        run: scripts/stress-test.sh --bin build/ctunnel --connections 1000 --concurrency 100 --bytes 2048 --rate 300 --artifacts-dir stress-artifacts
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: stress-smoke-debug
+          path: |
+            build/.config
+            build/ctunnel.link-report.txt
+            stress-artifacts/**
+          if-no-files-found: warn

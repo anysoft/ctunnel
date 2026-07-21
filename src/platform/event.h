@@ -5,6 +5,9 @@
 #include <stddef.h>
 #define CT_EV_READ 1
 #define CT_EV_WRITE 2
+#define CT_EV_ERROR 4
+#define CT_EV_HANGUP 8
+#define CT_EV_TIMER 16
 typedef struct ct_event_loop ct_event_loop;
 typedef struct {
     ct_socket fd;

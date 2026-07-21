@@ -63,6 +63,19 @@ if(NOT CTUNNEL_KCONFIG_RESULT EQUAL 0)
 endif()
 include("${CMAKE_BINARY_DIR}/generated/config.cmake")
 
+if(CONFIG_FEATURE_UDP)
+  math(EXPR CTUNNEL_UDP_FRAME_OVERHEAD
+       "1 + 8 + 8 + 2 + ${CONFIG_MAX_SERVICE_ID_LENGTH} + 1 + 16 + 2 + 2")
+  math(EXPR CTUNNEL_MIN_UDP_CONTROL_BUFFER
+       "${CONFIG_MAX_UDP_DATAGRAM_SIZE} + ${CTUNNEL_UDP_FRAME_OVERHEAD}")
+  if(CONFIG_CONTROL_BUFFER_SIZE LESS CTUNNEL_MIN_UDP_CONTROL_BUFFER)
+    message(FATAL_ERROR
+      "CONFIG_CONTROL_BUFFER_SIZE is too small for CONFIG_MAX_UDP_DATAGRAM_SIZE. "
+      "Need at least ${CTUNNEL_MIN_UDP_CONTROL_BUFFER} bytes, got "
+      "${CONFIG_CONTROL_BUFFER_SIZE}.")
+  endif()
+endif()
+
 set(CTUNNEL_LINK_MODE_COUNT 0)
 foreach(CTUNNEL_LINK_SYMBOL
         CONFIG_CTUNNEL_LINK_DYNAMIC
@@ -258,10 +271,14 @@ set(CTUNNEL_SOURCES
   src/net/relay.c
   src/platform/platform.c
   src/util/log.c
+  src/util/metrics.c
   src/util/ring.c)
 
 if(CONFIG_FEATURE_PROTOCOL_DIAGNOSTICS)
   list(APPEND CTUNNEL_SOURCES src/protocol/diagnostics.c)
+endif()
+if(CONFIG_FEATURE_PROXY_PROTOCOL)
+  list(APPEND CTUNNEL_SOURCES src/net/proxy_protocol.c)
 endif()
 
 if(CONFIG_CTUNNEL_SERVER)
@@ -508,7 +525,11 @@ if(CTUNNEL_BUILD_TESTS)
   else()
     add_executable(ctunnel_tests tests/unit/test_main.c
       src/config/config.c src/protocol/protocol.c src/crypto/crypto_monocypher.c
-      src/net/net.c src/net/relay.c src/util/ring.c src/platform/platform.c src/util/log.c)
+      src/net/net.c src/net/relay.c src/util/ring.c src/platform/platform.c src/util/log.c
+      src/util/metrics.c)
+    if(CONFIG_FEATURE_PROXY_PROTOCOL)
+      target_sources(ctunnel_tests PRIVATE src/net/proxy_protocol.c)
+    endif()
     if(CONFIG_FEATURE_PROTOCOL_DIAGNOSTICS)
       target_sources(ctunnel_tests PRIVATE src/protocol/diagnostics.c)
     endif()
@@ -535,6 +556,11 @@ if(CTUNNEL_BUILD_TESTS)
     if(NOT WIN32 AND CONFIG_CTUNNEL_CLIENT AND CONFIG_CTUNNEL_SERVER)
       add_test(NAME integration COMMAND sh ${CMAKE_SOURCE_DIR}/scripts/integration-test.sh $<TARGET_FILE:ctunnel>)
       set_tests_properties(integration PROPERTIES TIMEOUT 60)
+      if(CONFIG_FEATURE_PROXY_PROTOCOL)
+        add_test(NAME proxy-protocol
+                 COMMAND sh ${CMAKE_SOURCE_DIR}/scripts/proxy-protocol-test.sh $<TARGET_FILE:ctunnel>)
+        set_tests_properties(proxy-protocol PROPERTIES TIMEOUT 60)
+      endif()
     endif()
   endif()
 endif()

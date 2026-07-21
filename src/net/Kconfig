@@ -4,6 +4,27 @@ config FEATURE_TCP
 	bool "TCP forwarding"
 	default y
 
+config FEATURE_UDP
+	bool "UDP forwarding"
+	default y
+
+config FEATURE_PROXY_PROTOCOL
+	bool "PROXY Protocol support"
+	default y
+	help
+	  Allow TCP services to prepend HAProxy PROXY Protocol metadata to
+	  client-side local backend connections.
+
+config FEATURE_PROXY_PROTOCOL_V1
+	bool "PROXY Protocol v1"
+	depends on FEATURE_PROXY_PROTOCOL
+	default y
+
+config FEATURE_PROXY_PROTOCOL_V2
+	bool "PROXY Protocol v2"
+	depends on FEATURE_PROXY_PROTOCOL
+	default y
+
 config FEATURE_IPV4
 	bool "IPv4"
 	default y
@@ -22,4 +43,3 @@ config FEATURE_WORK_POOL
 	default y
 
 endmenu
-

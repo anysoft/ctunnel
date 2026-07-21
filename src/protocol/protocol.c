@@ -46,6 +46,9 @@ int ct_message_type_valid(uint8_t t) {
     case 23:
     case 24:
     case 25:
+    case 26:
+    case 27:
+    case 28:
     case 30:
     case 31:
     case 32:
@@ -126,14 +129,49 @@ int ct_data_record_header_decode(const uint8_t header[12], size_t max_plaintext,
 int ct_register_request_decode(const uint8_t *payload, size_t length, char *service_id,
                                size_t service_capacity, char *remote_address,
                                size_t address_capacity, uint16_t *remote_port, uint8_t *type,
-                               uint8_t *mode) {
+                               uint8_t *mode, uint8_t *proxy_protocol, uint32_t *udp_idle_timeout,
+                               uint32_t *udp_reply_timeout, uint32_t *udp_max_sessions,
+                               uint32_t *udp_max_datagram_size) {
     size_t offset = 0;
     if (ct_unpack_string(payload, length, &offset, service_id, service_capacity) ||
         ct_unpack_string(payload, length, &offset, remote_address, address_capacity) ||
-        length - offset != 4)
+        length - offset < 4)
         return -1;
     *remote_port = ct_get_u16(payload + offset);
     *type = payload[offset + 2];
     *mode = payload[offset + 3];
+    offset += 4;
+    if (proxy_protocol)
+        *proxy_protocol = 0;
+    if (udp_idle_timeout)
+        *udp_idle_timeout = 0;
+    if (udp_reply_timeout)
+        *udp_reply_timeout = 0;
+    if (udp_max_sessions)
+        *udp_max_sessions = 0;
+    if (udp_max_datagram_size)
+        *udp_max_datagram_size = 0;
+    if (length == offset)
+        return 0;
+    if (length - offset == 1 || length - offset == 17) {
+        if (proxy_protocol)
+            *proxy_protocol = payload[offset];
+        offset++;
+    }
+    if (length == offset)
+        return 0;
+    if (length - offset != 16)
+        return -1;
+    if (udp_idle_timeout)
+        *udp_idle_timeout = ct_get_u32(payload + offset);
+    offset += 4;
+    if (udp_reply_timeout)
+        *udp_reply_timeout = ct_get_u32(payload + offset);
+    offset += 4;
+    if (udp_max_sessions)
+        *udp_max_sessions = ct_get_u32(payload + offset);
+    offset += 4;
+    if (udp_max_datagram_size)
+        *udp_max_datagram_size = ct_get_u32(payload + offset);
     return 0;
 }

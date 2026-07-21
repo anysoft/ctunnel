@@ -98,8 +98,10 @@ int event_loop_wait(ct_event_loop *loop, ct_event *events, size_t capacity, int 
         for (int i = 0; i < count; i++) {
             events[i].fd = (ct_socket)ready[i].ident;
             events[i].events = ready[i].filter == EVFILT_WRITE ? CT_EV_WRITE : CT_EV_READ;
-            if (ready[i].flags & (EV_EOF | EV_ERROR))
-                events[i].events |= CT_EV_READ;
+            if (ready[i].flags & EV_EOF)
+                events[i].events |= CT_EV_READ | CT_EV_HANGUP;
+            if (ready[i].flags & EV_ERROR)
+                events[i].events |= CT_EV_READ | CT_EV_ERROR;
             events[i].user = ready[i].udata;
         }
     }

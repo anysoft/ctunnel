@@ -21,4 +21,6 @@ void ct_socket_close(ct_socket);
 int ct_socket_would_block(void);
 void ct_secure_zero(void *, size_t);
 void ct_sleep_ms(unsigned);
+void ct_fd_limit_diagnostics(unsigned recommended, unsigned long long *soft,
+                             unsigned long long *hard);
 #endif

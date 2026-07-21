@@ -1,0 +1,26 @@
+name: Nightly soak
+on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: Soak duration, such as 10m, 1h, 24h
+        required: false
+        default: 1h
+  schedule:
+    - cron: '17 18 * * *'
+permissions:
+  contents: read
+
+jobs:
+  soak:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - run: sudo apt-get update && sudo apt-get install -y cmake ninja-build binutils
+      - run: python3 scripts/kconfig/configure.py --config build/.config --build-dir build --target linux defconfig configs/default_defconfig
+      - run: scripts/config --file build/.config --build-dir build --target linux --enable CTUNNEL_LINK_DYNAMIC
+      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCTUNNEL_KCONFIG_CONFIG=build/.config -DCTUNNEL_BUILD_TESTS=OFF
+      - run: cmake --build build --verbose
+      - name: Soak
+        run: scripts/soak-test.sh --duration "${{ github.event.inputs.duration || '1h' }}" --connections 500 --concurrency 200 --bytes 4096
