@@ -40,9 +40,9 @@ case "$role" in
 esac
 
 if [ "$profile" = mini ]; then
-  if grep -q 'ct_keygen\|ct_fingerprint\|ct_derive_data\|ct_applet_build_info' "$symbols"; then
+  if grep -q 'ct_keygen\|ct_fingerprint\|ct_derive_data\|ct_applet_build_info\|ct_proxy_protocol_build' "$symbols"; then
     echo "disabled Mini symbol found" >&2
-    grep 'ct_keygen\|ct_fingerprint\|ct_derive_data\|ct_applet_build_info' "$symbols" >&2 || true
+    grep 'ct_keygen\|ct_fingerprint\|ct_derive_data\|ct_applet_build_info\|ct_proxy_protocol_build' "$symbols" >&2 || true
     exit 1
   fi
   cat >"$patterns" <<'EOF'
@@ -59,6 +59,11 @@ EOF
     grep -F -f "$patterns" "$texts" >&2 || true
     grep -Fx 'debug' "$texts" >&2 || true
     grep -Fx 'trace' "$texts" >&2 || true
+    exit 1
+  fi
+else
+  if ! grep -q 'ct_proxy_protocol_build' "$symbols"; then
+    echo "PROXY Protocol symbol missing from non-Mini binary" >&2
     exit 1
   fi
 fi

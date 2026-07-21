@@ -40,6 +40,16 @@ static const char *max_log_name(void) {
 #endif
 }
 
+#define CT_FEATURE_STATE(symbol)                                                                   \
+    do {                                                                                           \
+        puts(symbol ": on");                                                                       \
+    } while (0)
+
+#define CT_FEATURE_STATE_OFF(symbol)                                                               \
+    do {                                                                                           \
+        puts(symbol ": off");                                                                      \
+    } while (0)
+
 int ct_applet_build_info(int argc, char **argv) {
     (void)argc;
     (void)argv;
@@ -48,6 +58,62 @@ int ct_applet_build_info(int argc, char **argv) {
            "C runtime: %s\nmaximum log level: %s\n",
            CTUNNEL_EVENT_NAME, CTUNNEL_CONFIG_HASH, role_name(), CTUNNEL_LINK_MODE,
            CTUNNEL_LIBC_NAME, max_log_name());
+    puts("features:");
+#ifdef CONFIG_FEATURE_IPV4
+    CT_FEATURE_STATE("  IPv4");
+#else
+    CT_FEATURE_STATE_OFF("  IPv4");
+#endif
+#ifdef CONFIG_FEATURE_IPV6
+    CT_FEATURE_STATE("  IPv6");
+#else
+    CT_FEATURE_STATE_OFF("  IPv6");
+#endif
+#ifdef CONFIG_FEATURE_TCP
+    CT_FEATURE_STATE("  TCP forwarding");
+#else
+    CT_FEATURE_STATE_OFF("  TCP forwarding");
+#endif
+#ifdef CONFIG_FEATURE_UDP
+    CT_FEATURE_STATE("  UDP forwarding");
+#else
+    CT_FEATURE_STATE_OFF("  UDP forwarding");
+#endif
+#ifdef CONFIG_FEATURE_PROXY_PROTOCOL
+    CT_FEATURE_STATE("  PROXY Protocol");
+#else
+    CT_FEATURE_STATE_OFF("  PROXY Protocol");
+#endif
+#ifdef CONFIG_FEATURE_PROXY_PROTOCOL_V1
+    CT_FEATURE_STATE("  PROXY Protocol v1");
+#else
+    CT_FEATURE_STATE_OFF("  PROXY Protocol v1");
+#endif
+#ifdef CONFIG_FEATURE_PROXY_PROTOCOL_V2
+    CT_FEATURE_STATE("  PROXY Protocol v2");
+#else
+    CT_FEATURE_STATE_OFF("  PROXY Protocol v2");
+#endif
+#ifdef CONFIG_FEATURE_DATA_ENCRYPTION
+    CT_FEATURE_STATE("  data encryption");
+#else
+    CT_FEATURE_STATE_OFF("  data encryption");
+#endif
+#ifdef CONFIG_FEATURE_WORK_POOL
+    CT_FEATURE_STATE("  work connection pool");
+#else
+    CT_FEATURE_STATE_OFF("  work connection pool");
+#endif
+#ifdef CONFIG_FEATURE_KEYGEN
+    CT_FEATURE_STATE("  keygen");
+#else
+    CT_FEATURE_STATE_OFF("  keygen");
+#endif
+#ifdef CONFIG_FEATURE_FINGERPRINT
+    CT_FEATURE_STATE("  fingerprint");
+#else
+    CT_FEATURE_STATE_OFF("  fingerprint");
+#endif
     return 0;
 }
 
@@ -55,7 +121,9 @@ int ct_applet_build_config(int argc, char **argv) {
     (void)argc;
     (void)argv;
     printf("role=%s\nlink_mode=%s\nlibc=%s\nipv4=%s\nipv6=%s\n"
-           "data_encryption=%s\nwork_pool=%s\n"
+           "tcp=%s\nudp=%s\nproxy_protocol=%s\nproxy_protocol_v1=%s\n"
+           "proxy_protocol_v2=%s\ndata_encryption=%s\nwork_pool=%s\nkeygen=%s\n"
+           "fingerprint=%s\n"
            "event=%s\nlog_max=%s\nmax_clients=%d\nmax_services=%d\nmax_streams=%d\n"
            "max_pending=%d\nstream_buffer=%d\ncontrol_buffer=%d\nconfig_hash=%s\n",
            role_name(), CTUNNEL_LINK_MODE, CTUNNEL_LIBC_NAME,
@@ -69,12 +137,47 @@ int ct_applet_build_config(int argc, char **argv) {
 #else
            "n",
 #endif
+#ifdef CONFIG_FEATURE_TCP
+           "y",
+#else
+           "n",
+#endif
+#ifdef CONFIG_FEATURE_UDP
+           "y",
+#else
+           "n",
+#endif
+#ifdef CONFIG_FEATURE_PROXY_PROTOCOL
+           "y",
+#else
+           "n",
+#endif
+#ifdef CONFIG_FEATURE_PROXY_PROTOCOL_V1
+           "y",
+#else
+           "n",
+#endif
+#ifdef CONFIG_FEATURE_PROXY_PROTOCOL_V2
+           "y",
+#else
+           "n",
+#endif
 #ifdef CONFIG_FEATURE_DATA_ENCRYPTION
            "y",
 #else
            "n",
 #endif
 #ifdef CONFIG_FEATURE_WORK_POOL
+           "y",
+#else
+           "n",
+#endif
+#ifdef CONFIG_FEATURE_KEYGEN
+           "y",
+#else
+           "n",
+#endif
+#ifdef CONFIG_FEATURE_FINGERPRINT
            "y",
 #else
            "n",
